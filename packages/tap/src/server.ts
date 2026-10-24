@@ -8,6 +8,8 @@ export {
   createRegistryKeyResolver,
   createStaticKeyResolver,
   fetchRegistryKey,
+  isLoopbackHost,
+  normalizeRegistryUrl,
   parseRegistryKey,
   type RegistryKeyResolverOptions,
 } from "./resolver.js";

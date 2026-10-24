@@ -1,15 +1,12 @@
-import { Context, Duration, Effect, Layer, Schedule } from "effect";
+import { Context, Effect, Layer } from "effect";
 import {
   TapError,
   assertAllowedSkew,
-  assertTimeWindow,
   createMemoryReplayStore,
   createRegistryKeyResolver,
   createSqliteReplayStore,
   createTapClient,
-  cryptographicVerify,
-  fetchRegistryKey,
-  parseSignatureHeaders,
+  mergeSignals,
   systemClock,
   verifyRequest,
   type ClaimResult,
@@ -23,6 +20,7 @@ import {
   type SignOptions,
   type SignatureHeaders,
   type TapClientOptions,
+  type TapVerifierOptions,
   type VerifiedAgent,
   type VerifyOptions,
 } from "tap";
@@ -62,7 +60,7 @@ export function tapClientLayer(options: TapClientOptions): Layer.Layer<TapClient
   return Layer.succeed(TapClientService, {
     signRequest: (request, signOptions) =>
       Effect.tryPromise({
-        try: (signal) => client.signRequest(request, { ...signOptions, signal: merge(signOptions.signal, signal) }),
+        try: (signal) => client.signRequest(request, { ...signOptions, signal: mergeSignals([signOptions.signal, signal]) }),
         catch: toTapFailure,
       }),
   });
@@ -76,101 +74,30 @@ export interface VerifierLayerConfig {
 }
 
 /**
- * Shared verification pipeline. Key resolution and replay admission come from
- * the surrounding layers. Replay claims are not retried.
+ * Effect adapter over `verifyRequest`. Key resolution and replay admission
+ * come from the surrounding layers and run with this layer's context.
+ * Replay claims are not retried.
  */
 export function tapVerifierLayer(
   config: VerifierLayerConfig,
 ): Layer.Layer<TapVerifierService, never, KeyResolverService | ReplayStoreService> {
-  const skew = config.allowedSkewSeconds ?? 0;
-  const clock = config.clock ?? systemClock;
-  assertAllowedSkew(skew);
-  if (config.trustSource.trim().length === 0) {
-    throw new TapError("policy", "trust source is required");
-  }
+  const deps = verifierDeps(config);
   return Layer.effect(
     TapVerifierService,
     Effect.gen(function* () {
       const resolver = yield* KeyResolverService;
       const replay = yield* ReplayStoreService;
-      return {
-        verifyRequest: (request, options) =>
-          Effect.scoped(
-            Effect.gen(function* () {
-              const fiberSignal = yield* Effect.abortSignal;
-              const signal = merge(options.signal, fiberSignal);
-              const parsed = yield* Effect.try({
-                try: () =>
-                  parseSignatureHeaders({
-                    request,
-                    profile: config.profile,
-                    expectedTag: options.tag,
-                    requiredComponents: options.requiredComponents,
-                  }),
-                catch: toTapFailure,
-              });
-              const readNow = (): number => {
-                const value = clock.now();
-                if (!Number.isInteger(value)) {
-                  throw new TapError("invalid_time", "clock must return integer seconds");
-                }
-                return value;
-              };
-              yield* Effect.try({
-                try: () => assertTimeWindow(parsed.created, parsed.expires, readNow(), skew),
-                catch: toTapFailure,
-              });
-              const key = yield* resolver.resolve(parsed.keyId, signal);
-              yield* Effect.try({
-                try: () => {
-                  assertTimeWindow(parsed.created, parsed.expires, readNow(), skew);
-                  if (key.keyId !== parsed.keyId) throw new TapError("trust", "resolved key id does not match");
-                  if (key.algorithm !== parsed.alg) throw new TapError("trust", "key algorithm does not match the signature");
-                  if (key.agentId.length === 0 || key.agentDomain.length === 0) {
-                    throw new TapError("trust", "resolved agent identity is incomplete");
-                  }
-                  if (key.expiresAt !== null && key.expiresAt <= readNow()) throw new TapError("trust", "key is expired");
-                  if (!cryptographicVerify(parsed, key.publicKey)) {
-                    throw new TapError("invalid_signature", "signature verification failed");
-                  }
-                  assertTimeWindow(parsed.created, parsed.expires, readNow(), skew);
-                },
-                catch: toTapFailure,
-              });
-              const claim = yield* replay.claim(
-                {
-                  trustSource: config.trustSource,
-                  keyId: parsed.keyId,
-                  nonce: parsed.nonce,
-                  until: parsed.expires + skew,
-                },
-                signal,
-              );
-              yield* Effect.try({
-                try: () => {
-                  if (claim === "expired") throw new TapError("invalid_time", "replay claim deadline has passed");
-                  if (claim === "duplicate") throw new TapError("replay", "nonce has already been used");
-                  assertTimeWindow(parsed.created, parsed.expires, readNow(), skew);
-                  if (signal?.aborted) throw new TapError("cancelled", "operation aborted");
-                },
-                catch: toTapFailure,
-              });
-              const verified: VerifiedAgent = {
-                agentId: key.agentId,
-                agentName: key.agentName,
-                agentDomain: key.agentDomain,
-                keyId: key.keyId,
-                algorithm: key.algorithm,
-                tag: parsed.tag,
-                nonce: parsed.nonce,
-                created: parsed.created,
-                expires: parsed.expires,
-                coveredComponents: parsed.components,
-              };
-              return verified;
-            }),
-          ),
-      };
+      const context = yield* Effect.context<KeyResolverService | ReplayStoreService>();
+      const run = Effect.runPromiseWith(context);
+      return promiseVerifier({
+        ...deps,
+        resolver: {
+          resolve: (keyId, signal) => unwrap(run(resolver.resolve(keyId, signal))),
+        },
+        replay: {
+          claim: (entry, signal) => unwrap(run(replay.claim(entry, signal))),
+        },
+      });
     }),
   );
 }
@@ -180,23 +107,11 @@ export function tapVerifierFromPromises(input: VerifierLayerConfig & {
   resolver: KeyResolver;
   replay: ReplayStore;
 }): Layer.Layer<TapVerifierService> {
-  assertAllowedSkew(input.allowedSkewSeconds ?? 0);
-  if (input.trustSource.trim().length === 0) throw new TapError("policy", "trust source is required");
-  return Layer.succeed(TapVerifierService, {
-    verifyRequest: (request, options) =>
-      Effect.tryPromise({
-        try: (signal) =>
-          verifyRequest(request, { ...options, signal: merge(options.signal, signal) }, {
-            profile: input.profile,
-            trustSource: input.trustSource,
-            resolver: input.resolver,
-            replay: input.replay,
-            clock: input.clock ?? systemClock,
-            allowedSkewSeconds: input.allowedSkewSeconds ?? 0,
-          }),
-        catch: toTapFailure,
-      }),
-  });
+  return Layer.succeed(TapVerifierService, promiseVerifier({
+    ...verifierDeps(input),
+    resolver: input.resolver,
+    replay: input.replay,
+  }));
 }
 
 export interface RegistryResolverConfig {
@@ -206,49 +121,16 @@ export interface RegistryResolverConfig {
   clock?: Clock;
   fetchImpl?: typeof fetch;
   /** Retries after the first attempt. Authentication failures are not retried. */
-  retries?: number;
   transientRetries?: number;
 }
 
-/**
- * Uncached registry reads with Effect retries. Authentication failures and
- * replay claims are never retried; this layer does not claim nonces.
- */
-export function registryKeyResolverLayer(config: RegistryResolverConfig): Layer.Layer<KeyResolverService> {
-  const retries = config.retries ?? config.transientRetries ?? 2;
-  return Layer.succeed(KeyResolverService, {
-    resolve: (keyId, signal) =>
-      Effect.tryPromise({
-        try: (fiberSignal) =>
-          fetchRegistryKey({
-            registryUrl: config.registryUrl,
-            keyId,
-            timeoutMs: config.timeoutMs ?? 2_000,
-            signal: merge(signal, fiberSignal),
-            fetchImpl: config.fetchImpl,
-            clock: config.clock,
-          }),
-        catch: toTapFailure,
-      }).pipe(
-        Effect.retry({
-          times: retries,
-          schedule: Schedule.spaced(Duration.millis(10)),
-          while: (error) => error.code === "resolver_unavailable" && error.reason !== "unauthorized",
-        }),
-      ),
-  });
-}
-
-/** Cached registry resolver. The core cache enforces the 30 second revocation bound. */
+/** Cached registry resolver. The core resolver owns the retry loop and the 30 second revocation bound. */
 export function cachingRegistryResolverLayer(config: RegistryResolverConfig): Layer.Layer<KeyResolverService> {
-  const resolver = createRegistryKeyResolver({
-    ...config,
-    transientRetries: config.transientRetries ?? config.retries ?? 2,
-  });
+  const resolver = createRegistryKeyResolver(config);
   return Layer.succeed(KeyResolverService, {
     resolve: (keyId, signal) =>
       Effect.tryPromise({
-        try: (fiberSignal) => resolver.resolve(keyId, merge(signal, fiberSignal)),
+        try: (fiberSignal) => resolver.resolve(keyId, mergeSignals([signal, fiberSignal])),
         catch: toTapFailure,
       }),
   });
@@ -282,7 +164,38 @@ export function sqliteReplayLayer(filename: string, clock?: Clock): Layer.Layer<
   );
 }
 
-function merge(left?: AbortSignal, right?: AbortSignal): AbortSignal | undefined {
-  if (left && right) return AbortSignal.any([left, right]);
-  return left ?? right;
+function verifierDeps(config: VerifierLayerConfig): Omit<TapVerifierOptions, "resolver" | "replay"> & {
+  clock: Clock;
+  allowedSkewSeconds: number;
+} {
+  const allowedSkewSeconds = config.allowedSkewSeconds ?? 0;
+  assertAllowedSkew(allowedSkewSeconds);
+  if (config.trustSource.trim().length === 0) throw new TapError("policy", "trust source is required");
+  return {
+    profile: config.profile,
+    trustSource: config.trustSource,
+    clock: config.clock ?? systemClock,
+    allowedSkewSeconds,
+  };
+}
+
+function promiseVerifier(deps: TapVerifierOptions & { clock: Clock; allowedSkewSeconds: number }) {
+  return {
+    verifyRequest: (request: RequestData, options: VerifyOptions) =>
+      Effect.tryPromise({
+        try: (signal: AbortSignal) =>
+          verifyRequest(request, { ...options, signal: mergeSignals([options.signal, signal]) }, deps),
+        catch: toTapFailure,
+      }),
+  };
+}
+
+function unwrap<A>(promise: Promise<A>): Promise<A> {
+  return promise.then(
+    (value) => value,
+    (error: unknown) => {
+      if (error instanceof TapFailure) throw new TapError(error.code, error.reason);
+      throw error;
+    },
+  );
 }

@@ -164,7 +164,7 @@ export function isLoopbackHost(hostname: string): boolean {
   return parts.every((part) => /^\d+$/.test(part) && Number(part) <= 255);
 }
 
-function normalizeRegistryUrl(value: string): string {
+export function normalizeRegistryUrl(value: string): string {
   let url: URL;
   try {
     url = new URL(value);

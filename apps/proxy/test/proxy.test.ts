@@ -465,6 +465,10 @@ test("proxy route policy treats star as every method and requires https and a ba
   }), /https/);
   assert.throws(() => loadProxyConfig({
     ...base,
+    REGISTRY_URL: "http://user:pass@127.0.0.1:9",
+  }), /userinfo/);
+  assert.throws(() => loadProxyConfig({
+    ...base,
     TAP_PROTECTED_ROUTES: JSON.stringify([{ prefix: "/product", tag: "agent-browser-auth", methods: ["*"] }]),
     TAP_PUBLIC_ROUTES: JSON.stringify([{ prefix: "/product", methods: ["GET"] }]),
   }), /ambiguous/);
@@ -556,7 +560,7 @@ async function callRegistry(registry: RegistryHandle, method: string, path: stri
     },
     body: JSON.stringify(body),
   });
-  return { status: response.status, body: await response.json() as any };
+  return { status: response.status, body: await response.json() };
 }
 
 async function send(
@@ -568,7 +572,7 @@ async function send(
 ) {
   const response = await fetch(`${proxy.url}${path}`, { method, headers, body });
   const text = await response.text();
-  let parsed: any = text;
+  let parsed: unknown = text;
   try {
     parsed = JSON.parse(text);
   } catch {

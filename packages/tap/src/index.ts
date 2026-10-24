@@ -12,7 +12,7 @@ export {
   type SignatureMaterial,
 } from "./message.js";
 export { createMemoryReplayStore, createSqliteReplayStore } from "./replay.js";
-export { createRegistryKeyResolver, createStaticKeyResolver, fetchRegistryKey, isLoopbackHost, parseRegistryKey, type RegistryKeyResolverOptions } from "./resolver.js";
+export { createRegistryKeyResolver, createStaticKeyResolver, fetchRegistryKey, isLoopbackHost, normalizeRegistryUrl, parseRegistryKey, type RegistryKeyResolverOptions } from "./resolver.js";
 export { assertSafeRequestTarget, buildSignatureBase, parseTarget, type ParsedTarget } from "./target.js";
 export {
   ALGORITHMS,

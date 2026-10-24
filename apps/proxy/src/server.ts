@@ -68,9 +68,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, confi
       return send(res, req, 400, { error: "malformed", code: "malformed" }, method, pathOnly);
     }
     const length = contentLength(req);
-    if (length !== undefined && length > config.bodyLimit) {
-      return send(res, req, 413, { error: "malformed", code: "malformed" }, method, pathOnly);
-    }
+    if (length !== undefined && length > config.bodyLimit) throw new PayloadTooLarge();
     assertSafeRequestTarget(req.url ?? "/");
     const body = await readLimitedBody(req, config.bodyLimit);
     const decision = matchRoute(pathOnly, method, config);
@@ -105,10 +103,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, confi
     }
     forward(req, res, config, verified, method, pathOnly, body);
   } catch (error) {
-    if (isTapError(error) && error.reason === "payload too large") {
-      if (!res.headersSent) send(res, req, 413, { error: "malformed", code: "malformed" }, method, pathOnly);
-      return;
-    }
     const mapped = mapError(error);
     if (!res.headersSent) send(res, req, mapped.status, mapped.body, method, pathOnly);
     else res.destroy();
@@ -169,26 +163,28 @@ function forward(
   upstreamReq.end(body);
 }
 
+class PayloadTooLarge extends Error {
+  constructor() {
+    super("payload too large");
+    this.name = "PayloadTooLarge";
+  }
+}
+
 async function readLimitedBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let seen = 0;
-  let tooLarge = false;
   try {
     for await (const chunk of req) {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       seen += buf.length;
-      if (seen > limit) {
-        tooLarge = true;
-        break;
-      }
+      if (seen > limit) throw new PayloadTooLarge();
       chunks.push(buf);
     }
   } catch (error) {
-    if (tooLarge) throw new TapError("malformed", "payload too large");
+    if (error instanceof PayloadTooLarge) throw error;
     if (req.aborted) throw new TapError("cancelled", "operation aborted");
     throw error;
   }
-  if (tooLarge) throw new TapError("malformed", "payload too large");
   if (req.aborted) throw new TapError("cancelled", "operation aborted");
   return Buffer.concat(chunks);
 }
@@ -245,6 +241,7 @@ function isIdentityHeader(name: string): boolean {
 }
 
 function mapError(error: unknown): { status: number; body: { error: string; code: string } } {
+  if (error instanceof PayloadTooLarge) return { status: 413, body: { error: "malformed", code: "malformed" } };
   const code = error instanceof TapFailure || isTapError(error) ? error.code : undefined;
   if (code === "malformed") return { status: 400, body: { error: "malformed", code } };
   if (code === "resolver_unavailable" || code === "store_unavailable" || code === "cancelled") {

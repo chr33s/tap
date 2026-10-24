@@ -9,7 +9,9 @@ const TOKEN = "registry-admin-token";
 
 test("registry refuses cleartext binds off loopback", () => {
   assert.doesNotThrow(() => assertBindPolicy("127.0.0.1", false));
+  assert.doesNotThrow(() => assertBindPolicy("127.0.0.2", false));
   assert.doesNotThrow(() => assertBindPolicy("localhost", false));
+  assert.doesNotThrow(() => assertBindPolicy("::1", false));
   assert.doesNotThrow(() => assertBindPolicy("0.0.0.0", true));
   assert.throws(() => assertBindPolicy("0.0.0.0", false), /HTTPS is required/);
 });

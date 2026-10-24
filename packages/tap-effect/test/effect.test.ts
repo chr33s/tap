@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
-import { TapError, createSigner, generateKeyPair, type KeyResolver, type ReplayStore } from "tap";
+import { TapError, createSigner, createTapClient, generateKeyPair, type KeyResolver, type ReplayStore } from "tap";
 import {
   KeyResolverService,
   ReplayStoreService,
   TapClientService,
   TapFailure,
   TapVerifierService,
-  registryKeyResolverLayer,
+  cachingRegistryResolverLayer,
   tapClientLayer,
   tapVerifierFromPromises,
   tapVerifierLayer,
@@ -25,9 +25,10 @@ test("effect API passes the conformance suite", async () => {
 test("effect retries transient key reads and does not retry unauthorized responses", async () => {
   const pair = generateKeyPair("ed25519");
   let failures = 0;
-  const runtime = ManagedRuntime.make(registryKeyResolverLayer({
+  const runtime = ManagedRuntime.make(cachingRegistryResolverLayer({
     registryUrl: "https://registry.test",
-    retries: 2,
+    cacheTtlMs: 0,
+    transientRetries: 2,
     fetchImpl: async () => {
       failures += 1;
       if (failures < 3) throw new Error("temporary");
@@ -52,9 +53,10 @@ test("effect retries transient key reads and does not retry unauthorized respons
   await runtime.dispose();
 
   let denied = 0;
-  const deniedRuntime = ManagedRuntime.make(registryKeyResolverLayer({
+  const deniedRuntime = ManagedRuntime.make(cachingRegistryResolverLayer({
     registryUrl: "https://registry.test",
-    retries: 2,
+    cacheTtlMs: 0,
+    transientRetries: 2,
     fetchImpl: async () => {
       denied += 1;
       return new Response("no", { status: 401 });
@@ -69,6 +71,46 @@ test("effect retries transient key reads and does not retry unauthorized respons
   );
   assert.equal(denied, 1);
   await deniedRuntime.dispose();
+});
+
+test("effect verifier reports resolver failures through the shared pipeline", async () => {
+  const pair = generateKeyPair("ed25519");
+  const client = createTapClient({
+    keyId: "k",
+    profile: "tap",
+    signer: createSigner("ed25519", pair.privateKey),
+    nonce: () => "nonce-shared-1",
+  });
+  const request = { method: "GET", url: "https://example.com/product/1", headers: [] as Array<[string, string]> };
+  const headers = await client.signRequest(request, { tag: "agent-browser-auth" });
+  const signed = { ...request, headers: Object.entries(headers) };
+  const runtime = ManagedRuntime.make(
+    tapVerifierLayer({ profile: "tap", trustSource: "src" }).pipe(
+      Layer.provide(Layer.mergeAll(
+        resolverLayer({
+          async resolve() {
+            throw new Error("boom");
+          },
+        }),
+        replayLayer({
+          async claim() {
+            return "claimed";
+          },
+        }),
+      )),
+    ),
+  );
+  try {
+    await assert.rejects(
+      () => runtime.runPromise(Effect.gen(function* () {
+        const verifier = yield* TapVerifierService;
+        return yield* verifier.verifyRequest(signed, { tag: "agent-browser-auth" });
+      })),
+      (error: unknown) => error instanceof TapFailure && error.code === "resolver_unavailable",
+    );
+  } finally {
+    await runtime.dispose();
+  }
 });
 
 test("effect verifier enforces the same skew cap as the promise verifier", () => {

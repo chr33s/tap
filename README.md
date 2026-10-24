@@ -56,11 +56,11 @@ npm run start:proxy
 
 Protected routes name the expected tag and any extra covered components. Omit `methods`, or set `"*"`, to match every method. Public routes must be listed too. Anything else is rejected. The proxy verifies the URL the client addressed (honoring forwarded host and proto only from `TAP_TRUSTED_PROXIES`) and then connects to `UPSTREAM_URL`. Request targets that contain a fragment, a backslash, or a `.` or `..` segment (including `%2e`) are rejected before routing. It strips incoming `x-tap-*`, `x-signature-verified`, and `x-agent-verified`, and sets `x-tap-agent-id`, `x-tap-key-id`, `x-tap-tag`, and `x-tap-covered` only after verification. `x-tap-covered` is the signed component list in order, so the backend can see that an uncovered method, query, or body was not authenticated.
 
-`REGISTRY_URL` must be `https` unless its host is loopback. `TAP_BACKEND_TOKEN` is required when `UPSTREAM_URL` is not loopback; the proxy sends it as `x-tap-backend-token` and removes any client-supplied value.
+`REGISTRY_URL` must be `https` unless its host is loopback (`localhost`, `::1`, or `127.0.0.0/8`). The registry bind policy uses that same definition. `TAP_BACKEND_TOKEN` is required when `UPSTREAM_URL` is not loopback; the proxy sends it as `x-tap-backend-token` and removes any client-supplied value.
 
 Key lookups are cached for at most `min(TAP_CACHE_TTL_MS, 30000, key expires_at)` milliseconds. That is the longest revocation can lag. After the entry expires, a registry failure is an error; the proxy does not reuse the stale key. The proxy admits each nonce once in its SQLite replay store. A backend behind the proxy should trust the injected headers and should not admit the nonce again. A backend without this proxy should call `createTapVerifier` from `tap/server` and admit nonces itself.
 
-`400` malformed input, `403` failed or missing verification, `503` registry or replay store unavailable, `502` upstream failure. Forwarded requests are not retried.
+`400` malformed input, `413` when the body exceeds the limit, `403` failed or missing verification, `503` registry or replay store unavailable, `502` upstream failure. Forwarded requests are not retried.
 
 ## Agent
 
@@ -81,4 +81,4 @@ import { createSigner, createTapClient } from "tap/client";
 import { createRegistryKeyResolver, createSqliteReplayStore, createTapVerifier } from "tap/server";
 ```
 
-`RequestData.url` is the absolute URL with the original path and query encoding. Pass an `AbortSignal` through sign, verify, resolve, and claim. Effect hosts should build one `ManagedRuntime` from `tap-effect` and run each request on it. Effect retries transient registry reads only. It does not retry `401`/`403` or replay claims.
+`RequestData.url` is the absolute URL with the original path and query encoding. Pass an `AbortSignal` through sign, verify, resolve, and claim. Effect hosts should build one `ManagedRuntime` from `tap-effect` and run each request on it. The Effect verifier calls the same `verifyRequest` pipeline as the promise API. The registry resolver retries transient key reads and does not retry `401`/`403`. Replay claims are not retried.

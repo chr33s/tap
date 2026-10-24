@@ -3,7 +3,24 @@ import { DatabaseSync } from "node:sqlite";
 
 import { canonicalPublicKey, isAlgorithm, type Algorithm } from "tap";
 
-import { reply } from "./http-error.js";
+const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
+const SQLITE_CONSTRAINT_UNIQUE = 2067;
+
+export type StoreFailureKind = "not_found" | "conflict" | "invalid" | "ambiguous" | "internal";
+
+export class StoreFailure extends Error {
+  readonly kind: StoreFailureKind;
+
+  constructor(kind: StoreFailureKind, message: string) {
+    super(message);
+    this.name = "StoreFailure";
+    this.kind = kind;
+  }
+}
+
+function fail(kind: StoreFailureKind, message: string): never {
+  throw new StoreFailure(kind, message);
+}
 
 export interface AgentRecord {
   id: number;
@@ -125,9 +142,10 @@ export function openRegistryDatabase(filename: string): DatabaseSync {
 
 export function registerAgent(db: DatabaseSync, input: RegisterInput, now = nowSeconds()): { created: boolean; agent: AgentRecord } {
   return transaction(db, () => {
-    const existing = db.prepare("SELECT * FROM agents WHERE domain = ?").get(input.domain) as AgentRow | undefined;
+    const existingRow = db.prepare("SELECT * FROM agents WHERE domain = ?").get(input.domain);
+    const existing = existingRow ? agentRow(existingRow) : undefined;
     if (existing) {
-      if (input.keys.length > 0) reply(409, "conflict", "registration does not replace keys");
+      if (input.keys.length > 0) fail("conflict", "registration does not replace keys");
       db.prepare(
         "UPDATE agents SET name = ?, description = ?, contact_email = ?, updated_at = ? WHERE id = ?",
       ).run(input.name, input.description, input.contactEmail, now, existing.id);
@@ -143,20 +161,20 @@ export function registerAgent(db: DatabaseSync, input: RegisterInput, now = nowS
 }
 
 export function listPublicAgents(db: DatabaseSync, now = nowSeconds()): Array<Omit<AgentRecord, "contact_email">> {
-  const rows = db.prepare("SELECT * FROM agents WHERE is_active = 1 ORDER BY id").all() as unknown as AgentRow[];
+  const rows = db.prepare("SELECT * FROM agents WHERE is_active = 1 ORDER BY id").all().map(agentRow);
   return rows.map((row) => publicAgent(row, activeKeys(db, row.id, now)));
 }
 
 export function getPublicAgent(db: DatabaseSync, id: number, now = nowSeconds()): Omit<AgentRecord, "contact_email"> {
   const row = agentById(db, id);
-  if (!row || row.is_active !== 1) reply(404, "not_found", "agent not found");
+  if (!row || row.is_active !== 1) fail("not_found", "agent not found");
   return publicAgent(row, activeKeys(db, row.id, now));
 }
 
 export function updateAgent(db: DatabaseSync, id: number, patch: AgentPatch, now = nowSeconds()): AgentRecord {
   return transaction(db, () => {
     const row = agentById(db, id);
-    if (!row) reply(404, "not_found", "agent not found");
+    if (!row) fail("not_found", "agent not found");
     const name = patch.name ?? row.name;
     const description = patch.description === undefined ? row.description : patch.description;
     const contact = patch.contactEmail === undefined ? row.contact_email : patch.contactEmail;
@@ -174,7 +192,7 @@ export function updateAgent(db: DatabaseSync, id: number, patch: AgentPatch, now
 export function deactivateAgent(db: DatabaseSync, id: number, now = nowSeconds()): void {
   transaction(db, () => {
     const row = agentById(db, id);
-    if (!row) reply(404, "not_found", "agent not found");
+    if (!row) fail("not_found", "agent not found");
     db.prepare("UPDATE agents SET is_active = 0, updated_at = ? WHERE id = ?").run(now, id);
     db.prepare("UPDATE agent_keys SET is_active = 0, updated_at = ? WHERE agent_id = ?").run(now, id);
   });
@@ -183,10 +201,10 @@ export function deactivateAgent(db: DatabaseSync, id: number, now = nowSeconds()
 export function addKey(db: DatabaseSync, agentId: number, input: KeyInput, now = nowSeconds()): KeyRecord {
   return transaction(db, () => {
     const agent = agentById(db, agentId);
-    if (!agent) reply(404, "not_found", "agent not found");
+    if (!agent) fail("not_found", "agent not found");
     insertKey(db, agentId, input, now);
-    const row = db.prepare("SELECT * FROM agent_keys WHERE key_id = ?").get(input.keyId) as KeyRow | undefined;
-    if (!row) reply(500, "internal", "key insert failed");
+    const row = keyById(db, input.keyId);
+    if (!row) fail("internal", "key insert failed");
     return toKey(row);
   });
 }
@@ -194,20 +212,21 @@ export function addKey(db: DatabaseSync, agentId: number, input: KeyInput, now =
 export function updateKey(db: DatabaseSync, agentId: number, keyId: string, patch: KeyPatch, now = nowSeconds()): KeyRecord {
   return transaction(db, () => {
     const agent = agentById(db, agentId);
-    if (!agent) reply(404, "not_found", "agent not found");
-    const rows = db.prepare("SELECT * FROM agent_keys WHERE key_id = ?").all(keyId) as unknown as KeyRow[];
-    if (rows.length > 1) reply(500, "internal", "ambiguous key id");
+    if (!agent) fail("not_found", "agent not found");
+    const rows = db.prepare("SELECT * FROM agent_keys WHERE key_id = ?").all(keyId).map(keyRow);
+    if (rows.length > 1) fail("ambiguous", "ambiguous key id");
     const row = rows[0];
-    if (!row || row.agent_id !== agentId) reply(404, "not_found", "key not found");
+    if (!row || row.agent_id !== agentId) fail("not_found", "key not found");
     const active = patch.isActive === undefined ? row.is_active === 1 : patch.isActive;
-    if (active && agent.is_active !== 1) reply(409, "conflict", "agent is inactive");
+    if (active && agent.is_active !== 1) fail("conflict", "agent is inactive");
     const description = patch.description === undefined ? row.description : patch.description;
     const expires = patch.expiresAtSet ? (patch.expiresAt ?? null) : row.expires_at;
     db.prepare(
       "UPDATE agent_keys SET is_active = ?, description = ?, expires_at = ?, updated_at = ? WHERE id = ?",
     ).run(active ? 1 : 0, description, expires, now, row.id);
-    const updated = db.prepare("SELECT * FROM agent_keys WHERE id = ?").get(row.id) as unknown as KeyRow;
-    return toKey(updated);
+    const updated = db.prepare("SELECT * FROM agent_keys WHERE id = ?").get(row.id);
+    if (!updated) fail("internal", "key update failed");
+    return toKey(keyRow(updated));
   });
 }
 
@@ -218,32 +237,25 @@ export function lookupKey(db: DatabaseSync, keyId: string, agentId: number | und
     FROM agent_keys k
     JOIN agents a ON a.id = k.agent_id
     WHERE k.key_id = ?
-  `).all(keyId) as unknown as Array<Record<string, unknown>>;
-  if (rows.length > 1) reply(500, "internal", "ambiguous key id");
+  `).all(keyId).map(lookupRow);
+  if (rows.length > 1) fail("ambiguous", "ambiguous key id");
   const row = rows[0];
-  if (!row) reply(404, "not_found", "key not found");
-  if (agentId !== undefined && Number(row.agent_id) !== agentId) reply(404, "not_found", "key not found");
-  if (row.agent_active !== 1 || row.is_active !== 1) reply(404, "not_found", "key not found");
-  const expiresAt = row.expires_at === null || row.expires_at === undefined ? null : Number(row.expires_at);
-  if (expiresAt !== null && expiresAt <= now) reply(404, "not_found", "key not found");
-  const algorithm = String(row.algorithm);
-  if (!isAlgorithm(algorithm)) reply(404, "not_found", "key not found");
+  if (!row) fail("not_found", "key not found");
+  if (agentId !== undefined && row.agent_id !== agentId) fail("not_found", "key not found");
+  if (row.agent_active !== 1 || row.is_active !== 1) fail("not_found", "key not found");
+  if (row.expires_at !== null && row.expires_at <= now) fail("not_found", "key not found");
+  if (!isAlgorithm(row.algorithm)) fail("not_found", "key not found");
   return {
-    key_id: String(row.key_id),
-    public_key: String(row.public_key),
-    algorithm,
+    key_id: row.key_id,
+    public_key: row.public_key,
+    algorithm: row.algorithm,
     is_active: "true",
-    agent_id: Number(row.agent_id),
-    agent_name: String(row.agent_name),
-    agent_domain: String(row.agent_domain),
-    expires_at: expiresAt,
-    description: row.description === null || row.description === undefined ? null : String(row.description),
+    agent_id: row.agent_id,
+    agent_name: row.agent_name,
+    agent_domain: row.agent_domain,
+    expires_at: row.expires_at,
+    description: row.description,
   };
-}
-
-export function assertSingle<T>(rows: readonly T[], label: string): T | undefined {
-  if (rows.length > 1) reply(500, "internal", `ambiguous ${label}`);
-  return rows[0];
 }
 
 function insertKey(db: DatabaseSync, agentId: number, input: KeyInput, now: number): void {
@@ -251,7 +263,7 @@ function insertKey(db: DatabaseSync, agentId: number, input: KeyInput, now: numb
   try {
     canonical = canonicalPublicKey(input.algorithm, input.publicKey);
   } catch {
-    reply(400, "malformed", "invalid public key");
+    fail("invalid", "invalid public key");
   }
   try {
     db.prepare(
@@ -260,28 +272,34 @@ function insertKey(db: DatabaseSync, agentId: number, input: KeyInput, now: numb
        VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)`,
     ).run(agentId, input.keyId, canonical, input.algorithm, input.description, now, now);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (message.includes("UNIQUE")) reply(409, "conflict", "key id already exists");
+    if (isUniqueConstraint(error)) fail("conflict", "key id already exists");
     throw error;
   }
 }
 
 function mustLoadAgent(db: DatabaseSync, id: number, now: number): AgentRecord {
   const row = agentById(db, id);
-  if (!row) reply(404, "not_found", "agent not found");
-  const keys = (db.prepare("SELECT * FROM agent_keys WHERE agent_id = ? ORDER BY id").all(id) as unknown as KeyRow[]).map(toKey);
+  if (!row) fail("not_found", "agent not found");
+  const keys = db.prepare("SELECT * FROM agent_keys WHERE agent_id = ? ORDER BY id").all(id).map(keyRow).map(toKey);
   return toAgent(row, keys, now);
 }
 
 function activeKeys(db: DatabaseSync, agentId: number, now: number): KeyRecord[] {
   const rows = db.prepare(
     "SELECT * FROM agent_keys WHERE agent_id = ? AND is_active = 1 AND (expires_at IS NULL OR expires_at > ?) ORDER BY id",
-  ).all(agentId, now) as unknown as KeyRow[];
+  ).all(agentId, now).map(keyRow);
   return rows.map(toKey);
 }
 
 function agentById(db: DatabaseSync, id: number): AgentRow | undefined {
-  return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as AgentRow | undefined;
+  const row = db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
+  return row ? agentRow(row) : undefined;
+}
+
+function keyById(db: DatabaseSync, keyId: string): KeyRow | undefined {
+  const rows = db.prepare("SELECT * FROM agent_keys WHERE key_id = ?").all(keyId).map(keyRow);
+  if (rows.length > 1) fail("ambiguous", "ambiguous key id");
+  return rows[0];
 }
 
 function publicAgent(row: AgentRow, keys: KeyRecord[]): Omit<AgentRecord, "contact_email"> {
@@ -313,7 +331,7 @@ function toAgent(row: AgentRow, keys: KeyRecord[], _now: number): AgentRecord {
 
 function toKey(row: KeyRow): KeyRecord {
   const algorithm = row.algorithm;
-  if (!isAlgorithm(algorithm)) reply(500, "internal", "stored algorithm is invalid");
+  if (!isAlgorithm(algorithm)) fail("internal", "stored algorithm is invalid");
   return {
     id: row.id,
     agent_id: row.agent_id,
@@ -350,4 +368,103 @@ function iso(seconds: number): string {
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function agentRow(row: object): AgentRow {
+  const cells = readRow(row);
+  return {
+    id: numberColumn(cells, "id"),
+    name: stringColumn(cells, "name"),
+    domain: stringColumn(cells, "domain"),
+    description: nullableString(cells, "description"),
+    contact_email: nullableString(cells, "contact_email"),
+    is_active: numberColumn(cells, "is_active"),
+    created_at: numberColumn(cells, "created_at"),
+    updated_at: numberColumn(cells, "updated_at"),
+  };
+}
+
+function keyRow(row: object): KeyRow {
+  const cells = readRow(row);
+  return {
+    id: numberColumn(cells, "id"),
+    agent_id: numberColumn(cells, "agent_id"),
+    key_id: stringColumn(cells, "key_id"),
+    public_key: stringColumn(cells, "public_key"),
+    algorithm: stringColumn(cells, "algorithm"),
+    description: nullableString(cells, "description"),
+    is_active: numberColumn(cells, "is_active"),
+    expires_at: nullableNumber(cells, "expires_at"),
+    created_at: numberColumn(cells, "created_at"),
+    updated_at: numberColumn(cells, "updated_at"),
+  };
+}
+
+interface LookupRow {
+  key_id: string;
+  public_key: string;
+  algorithm: string;
+  is_active: number;
+  expires_at: number | null;
+  description: string | null;
+  agent_id: number;
+  agent_name: string;
+  agent_domain: string;
+  agent_active: number;
+}
+
+function lookupRow(row: object): LookupRow {
+  const cells = readRow(row);
+  return {
+    key_id: stringColumn(cells, "key_id"),
+    public_key: stringColumn(cells, "public_key"),
+    algorithm: stringColumn(cells, "algorithm"),
+    is_active: numberColumn(cells, "is_active"),
+    expires_at: nullableNumber(cells, "expires_at"),
+    description: nullableString(cells, "description"),
+    agent_id: numberColumn(cells, "agent_id"),
+    agent_name: stringColumn(cells, "agent_name"),
+    agent_domain: stringColumn(cells, "agent_domain"),
+    agent_active: numberColumn(cells, "agent_active"),
+  };
+}
+
+function readRow(row: object): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) out[key] = value;
+  return out;
+}
+
+function numberColumn(row: Record<string, unknown>, key: string): number {
+  const value = row[key];
+  if (typeof value === "bigint") {
+    const asNumber = Number(value);
+    if (!Number.isSafeInteger(asNumber)) fail("internal", `column ${key} is out of range`);
+    return asNumber;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) fail("internal", `column ${key} is invalid`);
+  return value;
+}
+
+function nullableNumber(row: Record<string, unknown>, key: string): number | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return numberColumn(row, key);
+}
+
+function stringColumn(row: Record<string, unknown>, key: string): string {
+  const value = row[key];
+  if (typeof value !== "string") fail("internal", `column ${key} is invalid`);
+  return value;
+}
+
+function nullableString(row: Record<string, unknown>, key: string): string | null {
+  const value = row[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") fail("internal", `column ${key} is invalid`);
+  return value;
+}
+
+function isUniqueConstraint(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("errcode" in error)) return false;
+  return error.errcode === SQLITE_CONSTRAINT_UNIQUE || error.errcode === SQLITE_CONSTRAINT_PRIMARYKEY;
 }

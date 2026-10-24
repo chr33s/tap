@@ -16,7 +16,6 @@ export {
   TapVerifierService,
   cachingRegistryResolverLayer,
   memoryReplayLayer,
-  registryKeyResolverLayer,
   sqliteReplayLayer,
   tapClientLayer,
   tapVerifierFromPromises,

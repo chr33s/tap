@@ -6,9 +6,11 @@ import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { Context, Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { isLoopbackHost } from "tap";
 
 import { HttpReply } from "./http-error.js";
 import {
+  StoreFailure,
   addKey,
   deactivateAgent,
   getPublicAgent,
@@ -81,7 +83,7 @@ interface HttpResult {
 }
 
 export function assertBindPolicy(host: string, tls: boolean): void {
-  if (!isLoopback(host) && !tls) {
+  if (!isLoopbackHost(host) && !tls) {
     throw new Error("HTTPS is required when the registry is not bound to a loopback address");
   }
 }
@@ -148,7 +150,7 @@ function handle(req: http.IncomingMessage, options: RegistryOptions): Effect.Eff
     }
     yield* attemptVoid(() => requireAdmin(req, options.adminToken));
     if (method === "POST" && url.pathname === "/agents/register") {
-      const body = yield* readJson(req, RegisterBody);
+      const body = yield* readJson(req, Schema.decodeUnknownSync(RegisterBody));
       return yield* attempt(() => {
         const result = registerAgent(db, toRegister(body), now);
         return {
@@ -174,7 +176,7 @@ function handle(req: http.IncomingMessage, options: RegistryOptions): Effect.Eff
       return yield* attempt(() => routePut(db, url.pathname, raw, now));
     }
     if (method === "POST") {
-      const body = yield* readJson(req, KeyBody);
+      const body = yield* readJson(req, Schema.decodeUnknownSync(KeyBody));
       return yield* attempt(() => {
         const addKeyPath = /^\/agents\/([1-9][0-9]*)\/keys$/.exec(url.pathname);
         if (!addKeyPath?.[1]) return { status: 404, body: { error: "not_found", message: "not found" } };
@@ -215,13 +217,13 @@ function routePut(db: DatabaseSync, pathname: string, raw: unknown, now: number)
   const agentPath = /^\/agents\/([1-9][0-9]*)$/.exec(pathname);
   if (agentPath?.[1]) {
     rejectFields(raw, ["name", "description", "contact_email", "is_active"]);
-    const agent = updateAgent(db, Number(agentPath[1]), toAgentPatch(decode<typeof AgentPatchBody.Type>(AgentPatchBody, raw)), now);
+    const agent = updateAgent(db, Number(agentPath[1]), toAgentPatch(decodeBody(Schema.decodeUnknownSync(AgentPatchBody), raw)), now);
     return { status: 200, body: { success: true, message: "agent updated", agent } };
   }
   const keyPath = /^\/agents\/([1-9][0-9]*)\/keys\/([^/]+)$/.exec(pathname);
   if (keyPath?.[1] && keyPath[2]) {
     rejectFields(raw, ["description", "is_active", "expires_at"]);
-    const key = updateKey(db, Number(keyPath[1]), decodePath(keyPath[2]), toKeyPatch(decode<typeof KeyPatchBody.Type>(KeyPatchBody, raw)), now);
+    const key = updateKey(db, Number(keyPath[1]), decodePath(keyPath[2]), toKeyPatch(decodeBody(Schema.decodeUnknownSync(KeyPatchBody), raw)), now);
     return { status: 200, body: { success: true, message: "key updated", key } };
   }
   return { status: 404, body: { error: "not_found", message: "not found" } };
@@ -242,9 +244,23 @@ function attemptVoid(fn: () => void): Effect.Effect<void, HttpReply> {
 }
 
 function asReply(cause: unknown): HttpReply {
-  return cause instanceof HttpReply
-    ? cause
-    : new HttpReply({ status: 500, body: { error: "internal", message: "internal error" } });
+  if (cause instanceof HttpReply) return cause;
+  if (cause instanceof StoreFailure) return storeReply(cause);
+  return new HttpReply({ status: 500, body: { error: "internal", message: "internal error" } });
+}
+
+function storeReply(failure: StoreFailure): HttpReply {
+  switch (failure.kind) {
+    case "not_found":
+      return new HttpReply({ status: 404, body: { error: "not_found", message: failure.message } });
+    case "conflict":
+      return new HttpReply({ status: 409, body: { error: "conflict", message: failure.message } });
+    case "invalid":
+      return new HttpReply({ status: 400, body: { error: "malformed", message: failure.message } });
+    case "ambiguous":
+    case "internal":
+      return new HttpReply({ status: 500, body: { error: "internal", message: failure.message } });
+  }
 }
 
 function toRegister(body: typeof RegisterBody.Type): RegisterInput {
@@ -306,13 +322,10 @@ function requireAdmin(req: http.IncomingMessage, expected: string): void {
   }
 }
 
-function readJson<S extends { readonly Type: unknown }>(
-  req: http.IncomingMessage,
-  schema: S,
-): Effect.Effect<S["Type"], HttpReply> {
+function readJson<A>(req: http.IncomingMessage, decode: (input: unknown) => A): Effect.Effect<A, HttpReply> {
   return Effect.flatMap(readRaw(req), (raw) =>
     Effect.try({
-      try: () => decode(schema, raw) as S["Type"],
+      try: () => decodeBody(decode, raw),
       catch: (cause) =>
         cause instanceof HttpReply
           ? cause
@@ -334,11 +347,11 @@ function readRaw(req: http.IncomingMessage): Effect.Effect<unknown, HttpReply> {
   });
 }
 
-function decode<T>(schema: unknown, value: unknown): T {
+function decodeBody<A>(decode: (input: unknown) => A, value: unknown): A {
   try {
-    const decodeUnknownSync = Schema.decodeUnknownSync as (inputSchema: unknown) => (input: unknown) => T;
-    return decodeUnknownSync(schema)(value);
-  } catch {
+    return decode(value);
+  } catch (cause) {
+    if (cause instanceof HttpReply) throw cause;
     throw new HttpReply({ status: 400, body: { error: "malformed", message: "invalid request body" } });
   }
 }
@@ -437,6 +450,3 @@ function listen(server: http.Server | https.Server, host: string, port: number):
   });
 }
 
-function isLoopback(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
-}

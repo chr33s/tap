@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { isLoopbackHost, isProfile, MAX_KEY_CACHE_TTL_MS, type ProfileName } from "tap";
+import { isLoopbackHost, isProfile, MAX_KEY_CACHE_TTL_MS, normalizeRegistryUrl, type ProfileName } from "tap";
 
 const Tag = Schema.Literals(["agent-browser-auth", "agent-payer-auth"]);
 
@@ -40,10 +40,7 @@ export interface ProxyConfig {
 export function loadProxyConfig(env: NodeJS.ProcessEnv): ProxyConfig {
   const upstreamRaw = required(env, "UPSTREAM_URL");
   const registryUrl = required(env, "REGISTRY_URL");
-  const registry = parseHttpUrl(registryUrl, "REGISTRY_URL");
-  if (registry.protocol !== "https:" && !isLoopbackHost(registry.hostname)) {
-    throw new Error("REGISTRY_URL must use https outside loopback");
-  }
+  normalizeRegistryUrl(registryUrl);
   const profileRaw = env.TAP_PROFILE ?? "tap";
   if (!isProfile(profileRaw)) throw new Error("TAP_PROFILE must be tap or legacySample");
   const upstream = parseHttpUrl(upstreamRaw, "UPSTREAM_URL");
@@ -160,7 +157,7 @@ function required(env: NodeJS.ProcessEnv, key: string): string {
 
 function parseJson(value: string | undefined, fallback: unknown): unknown {
   if (value === undefined || value.trim() === "") return fallback;
-  return JSON.parse(value) as unknown;
+  return JSON.parse(value);
 }
 
 function boundedInt(value: string | undefined, fallback: number, min: number, max: number): number {
