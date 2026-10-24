@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/tap" },
+    { "path": "packages/tap-effect" },
+    { "path": "apps/registry" },
+    { "path": "apps/proxy" },
+    { "path": "apps/agent" }
+  ]
+}
