@@ -29,7 +29,7 @@ test("proxy verifies, forwards, replays, and honors revocation within the cache 
   const bravo = generateKeyPair("ed25519");
   const agentId = await registerActive(registry, "alpha-1", alpha.publicKey.trim());
   await addKey(registry, agentId, "bravo-1", bravo.publicKey.trim(), true);
-  const proxy = await startProxy(config(echo.url, registry.url, join(directory, "replay.db"), {
+  const proxy = await startProxy(await config(echo.url, registry.url, join(directory, "replay.db"), {
     trustedProxies: ["127.0.0.1"],
     cacheTtlMs: 5_000,
     bodyLimit: 1024,
@@ -184,7 +184,7 @@ test("proxy verifies, forwards, replays, and honors revocation within the cache 
     };
     assert.equal((await send(proxy, "GET", "/product/durable", durableHeaders)).status, 200);
     await proxy.close();
-    const restarted = await startProxy(config(echo.url, registry.url, join(directory, "replay.db"), {
+    const restarted = await startProxy(await config(echo.url, registry.url, join(directory, "replay.db"), {
       trustedProxies: ["127.0.0.1"],
       cacheTtlMs: 5_000,
       protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
@@ -216,7 +216,7 @@ test("proxy reports registry and upstream failures and cancels in-flight verific
     res.end("no");
     req.resume();
   });
-  const proxy = await startProxy(config(echo.url, failing.url, join(directory, "replay.db"), {
+  const proxy = await startProxy(await config(echo.url, failing.url, join(directory, "replay.db"), {
     cacheTtlMs: 0,
     protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
     publicRoutes: [{ prefix: "/health" }],
@@ -240,7 +240,7 @@ test("proxy reports registry and upstream failures and cancels in-flight verific
     res.end("no");
     req.resume();
   });
-  const deniedProxy = await startProxy(config(echo.url, denied.url, join(directory, "denied.db"), {
+  const deniedProxy = await startProxy(await config(echo.url, denied.url, join(directory, "denied.db"), {
     cacheTtlMs: 0,
     protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
     publicRoutes: [],
@@ -263,7 +263,7 @@ test("proxy reports registry and upstream failures and cancels in-flight verific
     now: () => clock.now(),
   });
   await registerActive(registry, "k", pair.publicKey.trim());
-  const closedUpstream = await startProxy(config("http://127.0.0.1:1", registry.url, join(directory, "up.db"), {
+  const closedUpstream = await startProxy(await config("http://127.0.0.1:1", registry.url, join(directory, "up.db"), {
     cacheTtlMs: 0,
     upstreamTimeoutMs: 500,
     protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
@@ -306,7 +306,7 @@ test("proxy reports registry and upstream failures and cancels in-flight verific
     });
   });
   const before = echo.hits.length;
-  const slowProxy = await startProxy(config(echo.url, slow.url, join(directory, "slow.db"), {
+  const slowProxy = await startProxy(await config(echo.url, slow.url, join(directory, "slow.db"), {
     cacheTtlMs: 0,
     protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
     publicRoutes: [],
@@ -350,7 +350,7 @@ test("proxy rejects confusing targets, bounds the body before forwarding, and ig
   const pair = generateKeyPair("ed25519");
   await registerActive(registry, "edge-1", pair.publicKey.trim());
   const clock = createManualClock(Date.now());
-  const proxy = await startProxy(config(echo.url, registry.url, join(directory, "replay.db"), {
+  const proxy = await startProxy(await config(echo.url, registry.url, join(directory, "replay.db"), {
     cacheTtlMs: 0,
     bodyLimit: 64,
     trustedProxies: [],
@@ -429,7 +429,7 @@ test("proxy survives an upstream response reset", async () => {
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("ok");
   });
-  const proxy = await startProxy(config(upstream.url, "http://127.0.0.1:9", join(directory, "replay.db"), {
+  const proxy = await startProxy(await config(upstream.url, "http://127.0.0.1:9", join(directory, "replay.db"), {
     protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
     publicRoutes: [{ prefix: "/health" }],
   }));
@@ -445,6 +445,18 @@ test("proxy survives an upstream response reset", async () => {
   }
 });
 
+test("a route prefix ending in a slash matches only below it", () => {
+  const routes = {
+    protectedRoutes: [{ prefix: "/", tag: "agent-browser-auth" as const }],
+    publicRoutes: [{ prefix: "/static/" }],
+  };
+  assert.equal(matchRoute("/static", "GET", routes).kind, "protected");
+  assert.equal(matchRoute("/static/", "GET", routes).kind, "public");
+  assert.equal(matchRoute("/static/app.js", "GET", routes).kind, "public");
+  assert.equal(matchRoute("/STATIC/app.js", "GET", routes).kind, "public");
+  assert.equal(matchRoute("/admin/", "GET", { protectedRoutes: [{ prefix: "/admin", tag: "agent-browser-auth" }], publicRoutes: [] }).kind, "protected");
+});
+
 test("proxy route policy treats star as every method and requires https and a backend token off loopback", () => {
   assert.equal(matchRoute("/product/2", "POST", {
     protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth", methods: ["*"] }],
@@ -452,6 +464,7 @@ test("proxy route policy treats star as every method and requires https and a ba
   }).kind, "protected");
   const base = {
     UPSTREAM_URL: "http://127.0.0.1:9",
+    TAP_ORIGINS: "http://127.0.0.1:3001",
     REGISTRY_URL: "http://127.0.0.1:9",
     TAP_PROTECTED_ROUTES: JSON.stringify([{ prefix: "/product", tag: "agent-browser-auth" }]),
   };
@@ -505,11 +518,13 @@ async function signedSend(
   });
 }
 
-function config(upstream: string, registryUrl: string, replayDatabase: string, extra: Partial<ProxyConfig>): ProxyConfig {
+async function config(upstream: string, registryUrl: string, replayDatabase: string, extra: Partial<ProxyConfig>): Promise<ProxyConfig> {
+  const port = extra.port ?? await freePort();
   return {
     host: "127.0.0.1",
-    port: 0,
+    port,
     upstream: new URL(upstream),
+    origins: extra.origins ?? [`http://127.0.0.1:${port}`, "https://shop.example"],
     registryUrl,
     profile: "tap",
     trustSource: `registry:${registryUrl}`,
@@ -657,3 +672,89 @@ function rawHttp(port: number, request: string): Promise<{ status: number; body:
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+test("proxy matches routes on the path an upstream would route, checks the origin, and keeps the upstream prefix", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tap-proxy-canon-"));
+  const echo = await startEcho();
+  const registry = await startRegistry({
+    host: "127.0.0.1",
+    port: 0,
+    adminToken: TOKEN,
+    databasePath: join(directory, "registry.db"),
+  });
+  const pair = generateKeyPair("ed25519");
+  await registerActive(registry, "canon-1", pair.publicKey.trim());
+  const clock = createManualClock(Date.now());
+  const proxy = await startProxy(await config(`${echo.url}/base/`, registry.url, join(directory, "replay.db"), {
+    cacheTtlMs: 0,
+    trustedProxies: ["127.0.0.1"],
+    protectedRoutes: [{ prefix: "/admin", tag: "agent-browser-auth" }],
+    publicRoutes: [{ prefix: "/" }],
+  }), clock);
+  try {
+    const get = (path: string) =>
+      rawHttp(proxy.port, `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${proxy.port}\r\nConnection: close\r\n\r\n`);
+    for (const path of ["/ADMIN", "/admin;x/secret", "/Admin/", "/%2561dmin", "/%252561dmin", "/admin%253Bx"]) {
+      const response = await get(path);
+      assert.equal(response.status, 403, path);
+      assert.match(response.body, /policy/, path);
+    }
+    for (const path of ["/%61dmin", "//admin", "/%2Fadmin", "/x/..%2Fadmin", "/%u0061dmin", "/%25252561dmin"]) {
+      const response = await get(path);
+      assert.equal(response.status, 400, path);
+      assert.match(response.body, /malformed/, path);
+    }
+    assert.equal(echo.hits.length, 0);
+    for (const path of ["/search/50%off", "/caf%E9.txt", "/caf%C3%A9.txt"]) {
+      assert.equal((await get(path)).status, 200, path);
+    }
+
+    echo.hits.length = 0;
+    const open = await send(proxy, "GET", "/home?x=1");
+    assert.equal(open.status, 200);
+    assert.equal(open.body.url, "/base/home?x=1");
+
+    const client = clientFor("canon-1", pair.privateKey, clock);
+    const elsewhere = await client.signRequest(
+      { method: "GET", url: "https://shop-a.example/admin/1", headers: [] },
+      { tag: "agent-browser-auth" },
+    );
+    const crossMerchant = await send(proxy, "GET", "/admin/1", {
+      "x-forwarded-proto": "https",
+      "x-forwarded-host": "shop-a.example",
+      "Signature-Input": elsewhere["Signature-Input"],
+      Signature: elsewhere.Signature,
+    });
+    assert.equal(crossMerchant.status, 403);
+    assert.equal(crossMerchant.body.code, "policy");
+
+    const ours = await client.signRequest(
+      { method: "GET", url: "https://SHOP.example:443/admin/1", headers: [] },
+      { tag: "agent-browser-auth" },
+    );
+    const accepted = await send(proxy, "GET", "/admin/1", {
+      "x-forwarded-proto": "https",
+      "x-forwarded-host": "shop.example",
+      "Signature-Input": ours["Signature-Input"],
+      Signature: ours.Signature,
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal(accepted.body.url, "/base/admin/1");
+  } finally {
+    await proxy.close();
+    await registry.close();
+    await echo.close();
+  }
+});

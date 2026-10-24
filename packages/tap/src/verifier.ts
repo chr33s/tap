@@ -2,6 +2,7 @@ import { throwIfAborted } from "./abort.js";
 import { systemClock } from "./clock.js";
 import { isTapError, tapError } from "./errors.js";
 import { assertTimeWindow, cryptographicVerify, parseSignatureHeaders } from "./message.js";
+import { normalizeOrigin, originOf, parseTarget } from "./target.js";
 import type {
   Clock,
   KeyResolver,
@@ -22,6 +23,12 @@ export interface TapVerifierOptions {
    * configured registry, never a URL taken from the request.
    */
   trustSource: string;
+  /**
+   * Origins (`https://shop.example`) this verifier serves. A signature for any
+   * other `@authority` is rejected, so a request signed for another merchant
+   * that trusts the same registry cannot be replayed here.
+   */
+  origins: readonly string[];
   clock?: Clock;
   /** Acceptance window and replay retention extension. Default is zero. */
   allowedSkewSeconds?: number;
@@ -34,8 +41,15 @@ export function assertAllowedSkew(skew: number): void {
   }
 }
 
+/** Normalized, de-duplicated origin list. Throws `policy` when it is empty. */
+export function normalizeOrigins(origins: readonly string[] | undefined): string[] {
+  if (!origins || origins.length === 0) throw tapError("policy", "at least one origin is required");
+  return [...new Set(origins.map(normalizeOrigin))];
+}
+
 export function createTapVerifier(options: TapVerifierOptions): TapVerifier {
   if (options.trustSource.trim().length === 0) throw tapError("policy", "trust source is required");
+  const origins = normalizeOrigins(options.origins);
   const skew = options.allowedSkewSeconds ?? 0;
   assertAllowedSkew(skew);
   const clock = options.clock ?? systemClock;
@@ -43,6 +57,7 @@ export function createTapVerifier(options: TapVerifierOptions): TapVerifier {
     verifyRequest(request, verifyOptions) {
       return verifyRequest(request, verifyOptions, {
         ...options,
+        origins,
         allowedSkewSeconds: skew,
         clock,
       });
@@ -56,6 +71,10 @@ export async function verifyRequest(
   deps: TapVerifierOptions & { clock: Clock; allowedSkewSeconds: number },
 ): Promise<VerifiedAgent> {
   throwIfAborted(verifyOptions.signal);
+  // Before the key lookup, so a foreign origin never reaches the registry.
+  if (!deps.origins.includes(originOf(parseTarget(request.url)))) {
+    throw tapError("policy", "request origin is not served by this verifier");
+  }
   const parsed = parseSignatureHeaders({
     request,
     profile: deps.profile,

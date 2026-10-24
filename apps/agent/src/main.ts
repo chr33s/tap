@@ -96,7 +96,7 @@ async function sign(input: Args, deliver: boolean): Promise<void> {
   const alg = algorithm(flag(input, "alg", profile === "tap" ? "ed25519" : "ed25519"));
   const keyId = required(flag(input, "key-id"), "key id");
   const keyFile = required(flag(input, "key-file"), "key file");
-  const url = required(flag(input, "url"), "url");
+  const url = wireUrl(required(flag(input, "url"), "url"));
   const method = (flag(input, "method", "GET") || "GET").toUpperCase();
   const tag = intent(required(flag(input, "tag"), "tag"));
   const covered = flag(input, "covered");
@@ -137,6 +137,22 @@ async function sign(input: Args, deliver: boolean): Promise<void> {
   });
   process.stderr.write(`HTTP ${response.status}\n`);
   process.stdout.write(Buffer.from(await response.arrayBuffer()));
+}
+
+/**
+ * The URL exactly as `fetch` will put it on the wire (WHATWG percent-encoding,
+ * lowercase host, default port dropped, no fragment), so the signed `@path`
+ * and `@authority` match what the verifier rebuilds.
+ */
+function wireUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("url must be an absolute http(s) URL");
+  }
+  parsed.hash = "";
+  return parsed.href;
 }
 
 function headerPairs(values: readonly string[]): Array<[string, string]> {

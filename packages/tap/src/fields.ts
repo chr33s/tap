@@ -5,7 +5,8 @@ const KEY_ID = /^[A-Za-z0-9._-]{1,100}$/;
 const NONCE = /^[A-Za-z0-9._~-]{8,128}$/;
 
 export function assertKeyId(keyId: string): void {
-  if (!KEY_ID.test(keyId)) throw tapError("malformed", "invalid key id");
+  // `.` and `..` would be dot segments in the registry lookup URL.
+  if (!KEY_ID.test(keyId) || keyId === "." || keyId === "..") throw tapError("malformed", "invalid key id");
 }
 
 export function assertNonce(nonce: string): void {

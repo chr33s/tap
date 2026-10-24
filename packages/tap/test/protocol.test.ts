@@ -12,6 +12,8 @@ test("structured fields reject ambiguous and malformed input", () => {
   assert.throws(() => parseDictionary("a=1, a=2"), /duplicate dictionary key/);
   assert.throws(() => parseDictionary("a=01"), /leading zero/);
   assert.equal(parseDictionary('a="hi\\""').entries[0]?.value.type, "item");
+  assert.equal(parseDictionary("a=foo-bar").entries[0]?.value.type, "item");
+  assert.equal(parseDictionary("a=(b);tag=agent-browser-auth").entries.length, 1);
 });
 
 test("request targets reject fragments, backslashes, and dot segments", () => {

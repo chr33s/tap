@@ -7,6 +7,7 @@ import {
   createSqliteReplayStore,
   createTapClient,
   mergeSignals,
+  normalizeOrigins,
   systemClock,
   verifyRequest,
   type ClaimResult,
@@ -69,6 +70,8 @@ export function tapClientLayer(options: TapClientOptions): Layer.Layer<TapClient
 export interface VerifierLayerConfig {
   profile: ProfileName;
   trustSource: string;
+  /** Origins this verifier serves; see `TapVerifierOptions.origins`. */
+  origins: readonly string[];
   clock?: Clock;
   allowedSkewSeconds?: number;
 }
@@ -174,6 +177,7 @@ function verifierDeps(config: VerifierLayerConfig): Omit<TapVerifierOptions, "re
   return {
     profile: config.profile,
     trustSource: config.trustSource,
+    origins: normalizeOrigins(config.origins),
     clock: config.clock ?? systemClock,
     allowedSkewSeconds,
   };

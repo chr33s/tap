@@ -73,6 +73,7 @@ test("legacySample matches the pinned JavaScript verifier and Python signer", as
     resolver: createStaticKeyResolver([key]),
     replay: createMemoryReplayStore(clock),
     trustSource: "legacy",
+    origins: ["http://example.com:8080"],
     clock,
   });
   const verified = await verifier.verifyRequest(
@@ -131,6 +132,7 @@ test("RSA-PSS legacy signatures verify in TypeScript, Python, and the pinned ver
     }]),
     replay: createMemoryReplayStore(clock),
     trustSource: "rsa",
+    origins: ["https://merchant.test"],
     clock,
   });
   const foreignHeaders = {

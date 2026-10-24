@@ -38,6 +38,7 @@ export async function startProxy(config: ProxyConfig, clock?: Clock): Promise<Pr
     tapVerifierLayer({
       profile: config.profile,
       trustSource: config.trustSource,
+      origins: config.origins,
       clock,
       allowedSkewSeconds: config.allowedSkewSeconds,
     }).pipe(Layer.provide(dependencies)),
@@ -60,7 +61,12 @@ export async function startProxy(config: ProxyConfig, clock?: Clock): Promise<Pr
   };
 }
 
-async function handle(req: http.IncomingMessage, res: http.ServerResponse, config: ProxyConfig, runtime: Runtime): Promise<void> {
+async function handle(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: ProxyConfig,
+  runtime: Runtime,
+): Promise<void> {
   const method = req.method ?? "GET";
   const pathOnly = (req.url ?? "/").split("?")[0] ?? "/";
   try {
@@ -138,7 +144,7 @@ function forward(
       hostname: config.upstream.hostname,
       port: config.upstream.port || (config.upstream.protocol === "https:" ? 443 : 80),
       method: req.method,
-      path: req.url,
+      path: upstreamPath(config.upstream, req.url ?? "/"),
       headers,
       signal,
     },
@@ -187,6 +193,12 @@ async function readLimitedBody(req: http.IncomingMessage, limit: number): Promis
   }
   if (req.aborted) throw new TapError("cancelled", "operation aborted");
   return Buffer.concat(chunks);
+}
+
+/** Joins the request target onto any path prefix in `UPSTREAM_URL`. */
+function upstreamPath(upstream: URL, target: string): string {
+  const prefix = upstream.pathname.replace(/\/+$/, "");
+  return `${prefix}${target}`;
 }
 
 function externalRequest(req: http.IncomingMessage, config: ProxyConfig): RequestData {

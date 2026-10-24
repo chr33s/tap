@@ -330,5 +330,6 @@ function isTokenStart(ch: string): boolean {
 }
 
 function isTokenChar(ch: string): boolean {
-  return isTokenStart(ch) || isDigit(ch) || "!#$%&'*+-.^_`|~:/".includes(ch);
+  // `peek()` returns "" at end of input, and every string includes "".
+  return ch.length === 1 && (isTokenStart(ch) || isDigit(ch) || "!#$%&'*+-.^_`|~:/".includes(ch));
 }

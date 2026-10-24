@@ -13,6 +13,7 @@ export {
   parseRegistryKey,
   type RegistryKeyResolverOptions,
 } from "./resolver.js";
+export { normalizeOrigin } from "./target.js";
 export { createTapVerifier, verifyRequest, type TapVerifierOptions } from "./verifier.js";
 export {
   TapError,

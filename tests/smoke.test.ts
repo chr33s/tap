@@ -2,14 +2,17 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { startProxy } from "../apps/proxy/src/server.ts";
 import { startRegistry } from "../apps/registry/src/server.ts";
 
 const TOKEN = "registry-admin-token";
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 test("dev key, registry approval, and agent send reach the echo backend", async () => {
   const directory = mkdtempSync(join(tmpdir(), "tap-smoke-"));
@@ -52,10 +55,12 @@ test("dev key, registry approval, and agent send reach the echo backend", async 
     });
     assert.equal(response.status, 200);
   }
+  const proxyPort = await freePort();
   const proxy = await startProxy({
     host: "127.0.0.1",
-    port: 0,
+    port: proxyPort,
     upstream: new URL(echo.url),
+    origins: [`http://127.0.0.1:${proxyPort}`],
     registryUrl: registry.url,
     profile: "tap",
     trustSource: `registry:${registry.url}`,
@@ -131,7 +136,7 @@ test("dev key, registry approval, and agent send reach the echo backend", async 
 
 function agent(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["apps/agent/dist/main.js", ...args], { cwd: "/workspace" });
+    const child = spawn(process.execPath, ["apps/agent/dist/main.js", ...args], { cwd: ROOT });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -179,4 +184,16 @@ function startEcho(): Promise<{ url: string; close(): Promise<void> }> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
 }

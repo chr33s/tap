@@ -16,7 +16,7 @@ import {
   toTapFailure,
 } from "tap-effect";
 
-import { runConformance, type ConformanceApi } from "../../tap/test/conformance.ts";
+import { originsFor, runConformance, type ConformanceApi } from "../../tap/test/conformance.ts";
 
 test("effect API passes the conformance suite", async () => {
   await runConformance(effectApi());
@@ -85,7 +85,7 @@ test("effect verifier reports resolver failures through the shared pipeline", as
   const headers = await client.signRequest(request, { tag: "agent-browser-auth" });
   const signed = { ...request, headers: Object.entries(headers) };
   const runtime = ManagedRuntime.make(
-    tapVerifierLayer({ profile: "tap", trustSource: "src" }).pipe(
+    tapVerifierLayer({ profile: "tap", trustSource: "src", origins: ["https://example.com"] }).pipe(
       Layer.provide(Layer.mergeAll(
         resolverLayer({
           async resolve() {
@@ -115,15 +115,16 @@ test("effect verifier reports resolver failures through the shared pipeline", as
 
 test("effect verifier enforces the same skew cap as the promise verifier", () => {
   const rejected = (error: unknown): boolean => error instanceof TapError && error.code === "policy";
-  assert.throws(() => tapVerifierLayer({ profile: "tap", trustSource: "src", allowedSkewSeconds: 61 }), rejected);
+  assert.throws(() => tapVerifierLayer({ profile: "tap", trustSource: "src", origins: ["https://example.com"], allowedSkewSeconds: 61 }), rejected);
   assert.throws(() => tapVerifierFromPromises({
     profile: "tap",
     trustSource: "src",
+    origins: ["https://example.com"],
     allowedSkewSeconds: -1,
     resolver: { async resolve() { throw new Error("unused"); } },
     replay: { async claim() { return "claimed"; } },
   }), rejected);
-  assert.doesNotThrow(() => tapVerifierLayer({ profile: "tap", trustSource: "src", allowedSkewSeconds: 60 }));
+  assert.doesNotThrow(() => tapVerifierLayer({ profile: "tap", trustSource: "src", origins: ["https://example.com"], allowedSkewSeconds: 60 }));
 });
 
 function effectApi(): ConformanceApi {
@@ -150,6 +151,7 @@ function effectApi(): ConformanceApi {
         tapVerifierLayer({
           profile: input.profile,
           trustSource: input.trustSource ?? "test-source",
+          origins: input.origins ?? originsFor(input.request.url),
           clock: input.clock,
           allowedSkewSeconds: input.allowedSkewSeconds,
         }).pipe(Layer.provide(Layer.mergeAll(resolverLayer(input.resolver), replayLayer(input.replay)))),

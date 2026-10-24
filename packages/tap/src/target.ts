@@ -72,6 +72,22 @@ export function parseTarget(url: string): ParsedTarget {
   };
 }
 
+/**
+ * `scheme://authority` with the host lowercased and the default port dropped.
+ * Accepts an origin, or an origin followed by `/`.
+ */
+export function normalizeOrigin(value: string): string {
+  const target = parseTarget(value);
+  if ((target.rawPath !== "" && target.rawPath !== "/") || target.query !== null) {
+    throw tapError("policy", "origin must not have a path or query");
+  }
+  return originOf(target);
+}
+
+export function originOf(target: ParsedTarget): string {
+  return `${target.scheme}://${target.normalizedAuthority}`;
+}
+
 export function normalizeAuthority(authority: string, scheme: "http" | "https"): string {
   let host: string;
   let portText: string | undefined;

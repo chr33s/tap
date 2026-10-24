@@ -13,7 +13,7 @@ export {
 } from "./message.js";
 export { createMemoryReplayStore, createSqliteReplayStore } from "./replay.js";
 export { createRegistryKeyResolver, createStaticKeyResolver, fetchRegistryKey, isLoopbackHost, normalizeRegistryUrl, parseRegistryKey, type RegistryKeyResolverOptions } from "./resolver.js";
-export { assertSafeRequestTarget, buildSignatureBase, parseTarget, type ParsedTarget } from "./target.js";
+export { assertSafeRequestTarget, buildSignatureBase, normalizeOrigin, parseTarget, type ParsedTarget } from "./target.js";
 export {
   ALGORITHMS,
   INTENT_TAGS,
@@ -44,4 +44,4 @@ export {
   type VerifyOptions,
 } from "./types.js";
 export { createTapClient, randomNonce, signRequest, type TapClientOptions } from "./client.js";
-export { assertAllowedSkew, createTapVerifier, verifyRequest, type TapVerifierOptions } from "./verifier.js";
+export { assertAllowedSkew, createTapVerifier, normalizeOrigins, verifyRequest, type TapVerifierOptions } from "./verifier.js";

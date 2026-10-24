@@ -2,6 +2,7 @@ import { isAbortError, mergeSignals, throwIfAborted } from "./abort.js";
 import { systemClock } from "./clock.js";
 import { assertPublicKey, canonicalPublicKey } from "./crypto.js";
 import { tapError } from "./errors.js";
+import { assertKeyId } from "./fields.js";
 import { MAX_KEY_CACHE_TTL_MS, isAlgorithm, type Clock, type KeyResolver, type ResolvedKey } from "./types.js";
 
 export interface RegistryKeyResolverOptions {
@@ -18,15 +19,36 @@ export interface RegistryKeyResolverOptions {
   transientRetries?: number;
 }
 
+/**
+ * Entry caps; oldest entries are evicted first. Misses are attacker-chosen key
+ * ids, so they live in their own map and cannot evict registered keys.
+ */
+const MAX_KEY_ENTRIES = 10_000;
+const MAX_MISS_ENTRIES = 1_000;
+
 interface CacheEntry {
   key: ResolvedKey;
   freshUntilMs: number;
 }
 
+interface MissEntry {
+  error: unknown;
+  freshUntilMs: number;
+}
+
+interface Lookup {
+  promise: Promise<ResolvedKey>;
+  controller: AbortController;
+  waiters: number;
+}
+
 /**
  * Resolves keys from a configured registry. The registry URL is fixed at
  * construction; request headers cannot redirect it. Redirect responses fail
- * closed. Cache hits never outlive `min(ttl, 30s, key expiry)`.
+ * closed. Cache hits never outlive `min(ttl, 30s, key expiry)`. Lookups run
+ * before the signature can be checked, so unknown, inactive, and expired keys
+ * are cached for the same TTL, and concurrent lookups for one key id share a
+ * single registry request.
  */
 export function createRegistryKeyResolver(options: RegistryKeyResolverOptions): KeyResolver {
   const registryUrl = normalizeRegistryUrl(options.registryUrl);
@@ -36,34 +58,104 @@ export function createRegistryKeyResolver(options: RegistryKeyResolverOptions): 
   const clock = options.clock ?? systemClock;
   const fetchImpl = options.fetchImpl ?? fetch;
   const cache = new Map<string, CacheEntry>();
+  const misses = new Map<string, MissEntry>();
+  const inflight = new Map<string, Lookup>();
+
+  const lookup = async (keyId: string, signal: AbortSignal): Promise<ResolvedKey> => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      throwIfAborted(signal);
+      try {
+        const key = await fetchRegistryKey({ registryUrl, keyId, timeoutMs, signal, fetchImpl, clock });
+        const freshFor = key.expiresAt === null
+          ? ttlMs
+          : Math.min(ttlMs, Math.max(0, key.expiresAt * 1000 - clock.nowMs()));
+        if (freshFor > 0) remember(cache, MAX_KEY_ENTRIES, keyId, { key, freshUntilMs: clock.nowMs() + freshFor });
+        return key;
+      } catch (error) {
+        lastError = error;
+        if (isTrustError(error) && ttlMs > 0) {
+          remember(misses, MAX_MISS_ENTRIES, keyId, { error, freshUntilMs: clock.nowMs() + ttlMs });
+        }
+        if (!isTransient(error) || attempt === retries) break;
+      }
+    }
+    throw lastError;
+  };
 
   return {
     async resolve(keyId, signal) {
       throwIfAborted(signal);
       const nowMs = clock.nowMs();
+      const miss = misses.get(keyId);
+      if (miss && miss.freshUntilMs > nowMs) throw miss.error;
+      if (miss) misses.delete(keyId);
       const cached = cache.get(keyId);
-      if (cached && cached.freshUntilMs > nowMs && !isExpired(cached.key, clock.now())) {
-        return cached.key;
-      }
+      if (cached && cached.freshUntilMs > nowMs && !isExpired(cached.key, clock.now())) return cached.key;
       if (cached) cache.delete(keyId);
-      let lastError: unknown;
-      for (let attempt = 0; attempt <= retries; attempt += 1) {
-        throwIfAborted(signal);
-        try {
-          const key = await fetchRegistryKey({ registryUrl, keyId, timeoutMs, signal, fetchImpl, clock });
-          const freshFor = key.expiresAt === null
-            ? ttlMs
-            : Math.min(ttlMs, Math.max(0, key.expiresAt * 1000 - clock.nowMs()));
-          if (freshFor > 0) cache.set(keyId, { key, freshUntilMs: clock.nowMs() + freshFor });
-          return key;
-        } catch (error) {
-          lastError = error;
-          if (!isTransient(error) || attempt === retries) break;
-        }
+      let shared = inflight.get(keyId);
+      if (!shared) {
+        const controller = new AbortController();
+        const entry: Lookup = { controller, waiters: 0, promise: lookup(keyId, controller.signal) };
+        entry.promise
+          .finally(() => {
+            if (inflight.get(keyId) === entry) inflight.delete(keyId);
+          })
+          .catch(() => undefined);
+        inflight.set(keyId, entry);
+        shared = entry;
       }
-      throw lastError;
+      return await waitFor(shared, signal, () => {
+        if (inflight.get(keyId) === shared) inflight.delete(keyId);
+      });
     },
   };
+}
+
+function remember<T>(map: Map<string, T>, limit: number, keyId: string, entry: T): void {
+  map.delete(keyId);
+  if (map.size >= limit) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(keyId, entry);
+}
+
+/**
+ * Waits on a shared lookup. The registry request is aborted only when every
+ * caller waiting on it has been cancelled.
+ */
+function waitFor(lookup: Lookup, signal: AbortSignal | undefined, detach: () => void): Promise<ResolvedKey> {
+  lookup.waiters += 1;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      lookup.waiters -= 1;
+      if (lookup.waiters === 0) {
+        detach();
+        lookup.controller.abort();
+      }
+      reject(tapError("cancelled", "operation aborted"));
+    };
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    lookup.promise.then(
+      (key) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        resolve(key);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 export function createStaticKeyResolver(keys: readonly ResolvedKey[]): KeyResolver {
@@ -91,9 +183,12 @@ export async function fetchRegistryKey(input: {
   clock?: Clock;
 }): Promise<ResolvedKey> {
   throwIfAborted(input.signal);
+  assertKeyId(input.keyId);
   const clock = input.clock ?? systemClock;
   const fetchImpl = input.fetchImpl ?? fetch;
-  const url = new URL(`/keys/${encodeURIComponent(input.keyId)}`, normalizeRegistryUrl(input.registryUrl));
+  const base = normalizeRegistryUrl(input.registryUrl);
+  // Relative to the registry URL so a path prefix such as `/registry/` is kept.
+  const url = new URL(`keys/${encodeURIComponent(input.keyId)}`, base.endsWith("/") ? base : `${base}/`);
   const timeout = AbortSignal.timeout(input.timeoutMs);
   const signal = mergeSignals([input.signal, timeout]);
   let response: Response;
@@ -216,6 +311,10 @@ function isTransient(error: unknown): boolean {
     && error.code === "resolver_unavailable"
     && "reason" in error
     && error.reason !== "unauthorized";
+}
+
+function isTrustError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "trust";
 }
 
 function isTapTrust(error: unknown): boolean {

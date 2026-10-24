@@ -156,8 +156,11 @@ function parseTap(
   const candidates = [];
   for (const entry of inputDict.entries) {
     if (entry.value.type !== "inner-list") throw tapError("malformed", "signature parameters must be an inner list");
-    const tag = stringParam(entry.value.params, "tag");
-    if (tag === expectedTag) candidates.push(entry);
+    // Other members, such as an intermediary's own signature, may carry no tag.
+    const tag = entry.value.params.find((param) => param.key === "tag");
+    if (tag === undefined) continue;
+    if (tag.value.type !== "string") throw tapError("malformed", "parameter tag must be a string");
+    if (tag.value.value === expectedTag) candidates.push(entry);
   }
   if (candidates.length === 0) throw tapError("policy", "no signature matches the expected tag");
   if (candidates.length > 1) throw tapError("policy", "multiple signatures match the expected tag");

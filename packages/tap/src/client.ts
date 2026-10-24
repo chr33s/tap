@@ -15,6 +15,17 @@ import {
   type TapClient,
 } from "./types.js";
 
+export { createSigner, generateKeyPair, type GeneratedKeyPair } from "./crypto.js";
+export {
+  type IntentTag,
+  type ProfileName,
+  type RequestData,
+  type SignOptions,
+  type SignatureHeaders,
+  type Signer,
+  type TapClient,
+} from "./types.js";
+
 export interface TapClientOptions {
   keyId: string;
   signer: Signer;

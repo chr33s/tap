@@ -7,6 +7,7 @@ import {
   createSigner,
   createStaticKeyResolver,
   createTapClient,
+  parseTarget,
   type Clock,
   type KeyResolver,
   type ProfileName,
@@ -41,9 +42,16 @@ export interface ConformanceApi {
     replay: ReplayStore;
     clock?: Clock;
     trustSource?: string;
+    origins?: readonly string[];
     allowedSkewSeconds?: number;
     options: VerifyOptions;
   }): Promise<VerifiedAgent>;
+}
+
+/** The request's own origin, so harness callers that do not care about origins still verify. */
+export function originsFor(url: string): string[] {
+  const target = parseTarget(url);
+  return [`${target.scheme}://${target.normalizedAuthority}`];
 }
 
 export async function runConformance(api: ConformanceApi): Promise<void> {
@@ -360,6 +368,7 @@ export function promiseApi(): ConformanceApi {
         resolver: input.resolver,
         replay: input.replay,
         trustSource: input.trustSource ?? "test-source",
+        origins: input.origins ?? originsFor(input.request.url),
         clock: input.clock,
         allowedSkewSeconds: input.allowedSkewSeconds,
       });
