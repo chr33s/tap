@@ -156,6 +156,14 @@ export function parseRegistryKey(body: unknown, nowSeconds: number): ResolvedKey
   };
 }
 
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1") return true;
+  const parts = host.split(".");
+  if (parts.length !== 4 || parts[0] !== "127") return false;
+  return parts.every((part) => /^\d+$/.test(part) && Number(part) <= 255);
+}
+
 function normalizeRegistryUrl(value: string): string {
   let url: URL;
   try {
@@ -163,7 +171,9 @@ function normalizeRegistryUrl(value: string): string {
   } catch {
     throw tapError("policy", "registry url is invalid");
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw tapError("policy", "registry url must be http(s)");
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+    throw tapError("policy", "registry url must use https outside loopback");
+  }
   if (url.username || url.password) throw tapError("policy", "registry url userinfo is not allowed");
   url.hash = "";
   url.search = "";

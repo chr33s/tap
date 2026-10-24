@@ -1,6 +1,7 @@
 import { Context, Duration, Effect, Layer, Schedule } from "effect";
 import {
   TapError,
+  assertAllowedSkew,
   assertTimeWindow,
   createMemoryReplayStore,
   createRegistryKeyResolver,
@@ -83,6 +84,7 @@ export function tapVerifierLayer(
 ): Layer.Layer<TapVerifierService, never, KeyResolverService | ReplayStoreService> {
   const skew = config.allowedSkewSeconds ?? 0;
   const clock = config.clock ?? systemClock;
+  assertAllowedSkew(skew);
   if (config.trustSource.trim().length === 0) {
     throw new TapError("policy", "trust source is required");
   }
@@ -178,6 +180,8 @@ export function tapVerifierFromPromises(input: VerifierLayerConfig & {
   resolver: KeyResolver;
   replay: ReplayStore;
 }): Layer.Layer<TapVerifierService> {
+  assertAllowedSkew(input.allowedSkewSeconds ?? 0);
+  if (input.trustSource.trim().length === 0) throw new TapError("policy", "trust source is required");
   return Layer.succeed(TapVerifierService, {
     verifyRequest: (request, options) =>
       Effect.tryPromise({

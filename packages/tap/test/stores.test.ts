@@ -87,6 +87,13 @@ test("memory replay rejects expired claim deadlines", async () => {
   assert.equal(await store.claim({ trustSource: "t", keyId: "k", nonce: "n", until: 1_002 }), "duplicate");
 });
 
+test("registry urls outside loopback must be https", () => {
+  assert.throws(() => createRegistryKeyResolver({ registryUrl: "http://registry.example" }), (error: unknown) =>
+    error instanceof Error && "code" in error && error.code === "policy");
+  assert.doesNotThrow(() => createRegistryKeyResolver({ registryUrl: "http://127.0.0.2:9", transientRetries: 0 }));
+  assert.doesNotThrow(() => createRegistryKeyResolver({ registryUrl: "https://registry.example", transientRetries: 0 }));
+});
+
 test("registry cache expires and never serves a stale key after a failed refresh", async () => {
   const clock = createManualClock(1_700_000_000_000);
   let mode: "ok" | "gone" | "down" = "ok";
@@ -101,7 +108,7 @@ test("registry cache expires and never serves a stale key after a failed refresh
     expires_at: null as number | null,
   };
   const resolver = createRegistryKeyResolver({
-    registryUrl: "http://registry.test",
+    registryUrl: "https://registry.test",
     cacheTtlMs: 5_000,
     transientRetries: 0,
     clock,

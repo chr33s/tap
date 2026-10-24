@@ -27,12 +27,17 @@ export interface TapVerifierOptions {
   allowedSkewSeconds?: number;
 }
 
-export function createTapVerifier(options: TapVerifierOptions): TapVerifier {
-  if (options.trustSource.trim().length === 0) throw tapError("policy", "trust source is required");
-  const skew = options.allowedSkewSeconds ?? 0;
+/** Acceptance-window extension. Also the extra time a nonce stays claimed. */
+export function assertAllowedSkew(skew: number): void {
   if (!Number.isInteger(skew) || skew < 0 || skew > 60) {
     throw tapError("policy", "clock skew must be an integer from 0 to 60 seconds");
   }
+}
+
+export function createTapVerifier(options: TapVerifierOptions): TapVerifier {
+  if (options.trustSource.trim().length === 0) throw tapError("policy", "trust source is required");
+  const skew = options.allowedSkewSeconds ?? 0;
+  assertAllowedSkew(skew);
   const clock = options.clock ?? systemClock;
   return {
     verifyRequest(request, verifyOptions) {

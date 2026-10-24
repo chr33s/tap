@@ -98,6 +98,7 @@ test("dev key, registry approval, and agent send reach the echo backend", async 
     assert.equal(echoed.headers["x-tap-agent-id"], String(id));
     assert.equal(echoed.headers["x-tap-key-id"], "smoke-1");
     assert.equal(echoed.headers["x-tap-tag"], "agent-browser-auth");
+    assert.equal(echoed.headers["x-tap-covered"], "@authority,@path");
     assert.equal(echoed.headers["x-tap-backend-token"], "backend-secret");
 
     const inactive = await fetch(`${registry.url}/agents/${id}/keys/smoke-1`, {

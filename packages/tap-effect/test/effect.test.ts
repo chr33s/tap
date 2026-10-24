@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
-import { createSigner, generateKeyPair, type KeyResolver, type ReplayStore } from "tap";
+import { TapError, createSigner, generateKeyPair, type KeyResolver, type ReplayStore } from "tap";
 import {
   KeyResolverService,
   ReplayStoreService,
@@ -11,6 +11,7 @@ import {
   TapVerifierService,
   registryKeyResolverLayer,
   tapClientLayer,
+  tapVerifierFromPromises,
   tapVerifierLayer,
   toTapFailure,
 } from "tap-effect";
@@ -68,6 +69,19 @@ test("effect retries transient key reads and does not retry unauthorized respons
   );
   assert.equal(denied, 1);
   await deniedRuntime.dispose();
+});
+
+test("effect verifier enforces the same skew cap as the promise verifier", () => {
+  const rejected = (error: unknown): boolean => error instanceof TapError && error.code === "policy";
+  assert.throws(() => tapVerifierLayer({ profile: "tap", trustSource: "src", allowedSkewSeconds: 61 }), rejected);
+  assert.throws(() => tapVerifierFromPromises({
+    profile: "tap",
+    trustSource: "src",
+    allowedSkewSeconds: -1,
+    resolver: { async resolve() { throw new Error("unused"); } },
+    replay: { async claim() { return "claimed"; } },
+  }), rejected);
+  assert.doesNotThrow(() => tapVerifierLayer({ profile: "tap", trustSource: "src", allowedSkewSeconds: 60 }));
 });
 
 function effectApi(): ConformanceApi {

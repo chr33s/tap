@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import { test } from "node:test";
 
 import { createManualClock, createSigner, createTapClient, generateKeyPair, type ManualClock } from "tap";
 
-import type { ProxyConfig } from "../src/config.ts";
+import { loadProxyConfig, matchRoute, type ProxyConfig } from "../src/config.ts";
 import { startProxy, type ProxyHandle } from "../src/server.ts";
 import { startRegistry, type RegistryHandle } from "../../registry/src/server.ts";
 
@@ -51,11 +52,13 @@ test("proxy verifies, forwards, replays, and honors revocation within the cache 
 
     const health = await send(proxy, "GET", "/health", {
       "x-tap-agent-id": "forged",
+      "x-tap-covered": "forged",
       "x-signature-verified": "yes",
       "x-tap-backend-token": "stolen",
     });
     assert.equal(health.status, 200);
     assert.equal(health.body.headers["x-tap-agent-id"], undefined);
+    assert.equal(health.body.headers["x-tap-covered"], undefined);
     assert.equal(health.body.headers["x-signature-verified"], undefined);
     assert.equal(health.body.headers["x-tap-backend-token"], "backend-secret");
 
@@ -70,6 +73,7 @@ test("proxy verifies, forwards, replays, and honors revocation within the cache 
       "Signature-Input": first["Signature-Input"],
       Signature: first.Signature,
       "x-tap-agent-id": "forged",
+      "x-tap-covered": "forged",
       "x-agent-verified": "yes",
     });
     assert.equal(ok.status, 200);
@@ -77,6 +81,7 @@ test("proxy verifies, forwards, replays, and honors revocation within the cache 
     assert.equal(ok.body.headers["x-tap-agent-id"], String(agentId));
     assert.equal(ok.body.headers["x-tap-key-id"], "alpha-1");
     assert.equal(ok.body.headers["x-tap-tag"], "agent-browser-auth");
+    assert.equal(ok.body.headers["x-tap-covered"], "@authority,@path");
     assert.equal(ok.body.headers["x-agent-verified"], undefined);
     assert.equal(ok.body.headers.host, new URL(echo.url).host);
 
@@ -333,6 +338,146 @@ test("proxy reports registry and upstream failures and cancels in-flight verific
   }
 });
 
+test("proxy rejects confusing targets, bounds the body before forwarding, and ignores untrusted forwarded headers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tap-proxy-target-"));
+  const echo = await startEcho();
+  const registry = await startRegistry({
+    host: "127.0.0.1",
+    port: 0,
+    adminToken: TOKEN,
+    databasePath: join(directory, "registry.db"),
+  });
+  const pair = generateKeyPair("ed25519");
+  await registerActive(registry, "edge-1", pair.publicKey.trim());
+  const clock = createManualClock(Date.now());
+  const proxy = await startProxy(config(echo.url, registry.url, join(directory, "replay.db"), {
+    cacheTtlMs: 0,
+    bodyLimit: 64,
+    trustedProxies: [],
+    protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
+    publicRoutes: [{ prefix: "/health" }],
+  }), clock);
+  try {
+    const before = echo.hits.length;
+    for (const path of ["/product/../admin", "/product/%2e%2e/admin", "/product/%2E/%2e%2E/admin", "/health/../admin"]) {
+      const response = await rawHttp(proxy.port, `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${proxy.port}\r\nConnection: close\r\n\r\n`);
+      assert.equal(response.status, 400, path);
+      assert.match(response.body, /malformed/);
+    }
+    const slash = await rawHttp(
+      proxy.port,
+      `GET /product/..\\admin HTTP/1.1\r\nHost: 127.0.0.1:${proxy.port}\r\nConnection: close\r\n\r\n`,
+    );
+    assert.equal(slash.status, 400);
+    const fragment = await rawHttp(
+      proxy.port,
+      `GET /product/1#extra HTTP/1.1\r\nHost: 127.0.0.1:${proxy.port}\r\nConnection: close\r\n\r\n`,
+    );
+    assert.equal(fragment.status, 400);
+    const chunk = "x".repeat(80);
+    const oversized = await rawHttp(
+      proxy.port,
+      `POST /product/1 HTTP/1.1\r\nHost: 127.0.0.1:${proxy.port}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n${chunk.length.toString(16)}\r\n${chunk}\r\n0\r\n\r\n`,
+    );
+    assert.equal(oversized.status, 413);
+    assert.equal(echo.hits.length, before);
+
+    const client = clientFor("edge-1", pair.privateKey, clock);
+    const signed = await client.signRequest(
+      { method: "GET", url: `${proxy.url}/product/1`, headers: [] },
+      { tag: "agent-browser-auth" },
+    );
+    const ignored = await send(proxy, "GET", "/product/1", {
+      "Signature-Input": signed["Signature-Input"],
+      Signature: signed.Signature,
+      "x-forwarded-host": "evil.example",
+      "x-forwarded-proto": "https",
+    });
+    assert.equal(ignored.status, 200);
+    assert.equal(ignored.body.headers["x-tap-covered"], "@authority,@path");
+    const forged = await client.signRequest(
+      { method: "GET", url: "https://evil.example/product/1", headers: [] },
+      { tag: "agent-browser-auth" },
+    );
+    const rejected = await send(proxy, "GET", "/product/1", {
+      "Signature-Input": forged["Signature-Input"],
+      Signature: forged.Signature,
+      "x-forwarded-host": "evil.example",
+      "x-forwarded-proto": "https",
+    });
+    assert.equal(rejected.status, 403);
+    assert.equal(rejected.body.code, "invalid_signature");
+  } finally {
+    await proxy.close();
+    await registry.close();
+    await echo.close();
+  }
+});
+
+test("proxy survives an upstream response reset", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tap-proxy-reset-"));
+  let calls = 0;
+  const upstream = await listen((req, res) => {
+    calls += 1;
+    if (calls === 1) {
+      res.writeHead(200, { "content-type": "text/plain", "content-length": "4" });
+      res.write("nope");
+      res.destroy(new Error("reset"));
+      return;
+    }
+    req.resume();
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+  });
+  const proxy = await startProxy(config(upstream.url, "http://127.0.0.1:9", join(directory, "replay.db"), {
+    protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
+    publicRoutes: [{ prefix: "/health" }],
+  }));
+  try {
+    await fetch(`${proxy.url}/health`).then((response) => response.text(), () => "reset");
+    const second = await fetch(`${proxy.url}/health`);
+    assert.equal(second.status, 200);
+    assert.equal(await second.text(), "ok");
+    assert.equal(calls, 2);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test("proxy route policy treats star as every method and requires https and a backend token off loopback", () => {
+  assert.equal(matchRoute("/product/2", "POST", {
+    protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth", methods: ["*"] }],
+    publicRoutes: [],
+  }).kind, "protected");
+  const base = {
+    UPSTREAM_URL: "http://127.0.0.1:9",
+    REGISTRY_URL: "http://127.0.0.1:9",
+    TAP_PROTECTED_ROUTES: JSON.stringify([{ prefix: "/product", tag: "agent-browser-auth" }]),
+  };
+  assert.throws(() => loadProxyConfig({
+    ...base,
+    UPSTREAM_URL: "http://backend.example",
+  }), /TAP_BACKEND_TOKEN/);
+  assert.throws(() => loadProxyConfig({
+    ...base,
+    REGISTRY_URL: "http://registry.example",
+  }), /https/);
+  assert.throws(() => loadProxyConfig({
+    ...base,
+    TAP_PROTECTED_ROUTES: JSON.stringify([{ prefix: "/product", tag: "agent-browser-auth", methods: ["*"] }]),
+    TAP_PUBLIC_ROUTES: JSON.stringify([{ prefix: "/product", methods: ["GET"] }]),
+  }), /ambiguous/);
+  const loaded = loadProxyConfig({
+    ...base,
+    UPSTREAM_URL: "https://backend.example",
+    REGISTRY_URL: "https://registry.example",
+    TAP_BACKEND_TOKEN: "backend-secret",
+  });
+  assert.equal(loaded.backendToken, "backend-secret");
+  assert.equal(loaded.registryUrl, "https://registry.example");
+});
+
 function clientFor(keyId: string, privateKey: string, clock: ManualClock) {
   return createTapClient({
     keyId,
@@ -487,6 +632,20 @@ function listen(handler: http.RequestListener): Promise<{ url: string; close(): 
         url: `http://127.0.0.1:${address.port}`,
         close: () => new Promise((done, fail) => server.close((error) => (error ? fail(error) : done()))),
       });
+    });
+  });
+}
+
+function rawHttp(port: number, request: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, "127.0.0.1", () => socket.write(request));
+    const chunks: Buffer[] = [];
+    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+    socket.on("error", reject);
+    socket.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8");
+      const [head, body = ""] = text.split("\r\n\r\n");
+      resolve({ status: Number(head?.split(" ")[1] ?? 0), body });
     });
   });
 }

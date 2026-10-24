@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { isProfile, MAX_KEY_CACHE_TTL_MS, type ProfileName } from "tap";
+import { isLoopbackHost, isProfile, MAX_KEY_CACHE_TTL_MS, type ProfileName } from "tap";
 
 const Tag = Schema.Literals(["agent-browser-auth", "agent-payer-auth"]);
 
@@ -40,15 +40,16 @@ export interface ProxyConfig {
 export function loadProxyConfig(env: NodeJS.ProcessEnv): ProxyConfig {
   const upstreamRaw = required(env, "UPSTREAM_URL");
   const registryUrl = required(env, "REGISTRY_URL");
+  const registry = parseHttpUrl(registryUrl, "REGISTRY_URL");
+  if (registry.protocol !== "https:" && !isLoopbackHost(registry.hostname)) {
+    throw new Error("REGISTRY_URL must use https outside loopback");
+  }
   const profileRaw = env.TAP_PROFILE ?? "tap";
   if (!isProfile(profileRaw)) throw new Error("TAP_PROFILE must be tap or legacySample");
-  let upstream: URL;
-  try {
-    upstream = new URL(upstreamRaw);
-  } catch {
-    throw new Error("UPSTREAM_URL is invalid");
+  const upstream = parseHttpUrl(upstreamRaw, "UPSTREAM_URL");
+  if (!isLoopbackHost(upstream.hostname) && !env.TAP_BACKEND_TOKEN) {
+    throw new Error("TAP_BACKEND_TOKEN is required when the upstream is not a loopback host");
   }
-  if (upstream.protocol !== "http:" && upstream.protocol !== "https:") throw new Error("UPSTREAM_URL must be http(s)");
   const protectedRoutes = Schema.decodeUnknownSync(Schema.Array(ProtectedRouteSchema))(parseJson(env.TAP_PROTECTED_ROUTES, []));
   const publicRoutes = Schema.decodeUnknownSync(Schema.Array(PublicRouteSchema))(parseJson(env.TAP_PUBLIC_ROUTES, []));
   validateRoutes(protectedRoutes, publicRoutes);
@@ -104,16 +105,27 @@ export function matchRoute(pathname: string, method: string, config: Pick<ProxyC
 
 function validateRoutes(protectedRoutes: readonly ProtectedRoute[], publicRoutes: readonly PublicRoute[]): void {
   if (protectedRoutes.length === 0) throw new Error("TAP_PROTECTED_ROUTES must contain at least one route");
-  const seen = new Map<string, string>();
+  const entries: Array<{ prefix: string; methods: readonly string[] }> = [];
   for (const route of [...protectedRoutes, ...publicRoutes]) {
     if (!route.prefix.startsWith("/") || route.prefix.includes("?")) throw new Error(`invalid route prefix ${route.prefix}`);
-    const methods = route.methods ?? ["*"];
-    for (const method of methods) {
-      const key = `${route.prefix} ${method.toUpperCase()}`;
-      if (seen.has(key)) throw new Error(`ambiguous route ${key}`);
-      seen.set(key, "1");
+    const methods = methodSet(route.methods);
+    for (const previous of entries) {
+      if (previous.prefix === route.prefix && methodsOverlap(previous.methods, methods)) {
+        throw new Error(`ambiguous route ${route.prefix}`);
+      }
     }
+    entries.push({ prefix: route.prefix, methods });
   }
+}
+
+function methodSet(methods: readonly string[] | undefined): readonly string[] {
+  if (!methods || methods.length === 0 || methods.some((item) => item === "*")) return ["*"];
+  return [...new Set(methods.map((item) => item.toUpperCase()))];
+}
+
+function methodsOverlap(left: readonly string[], right: readonly string[]): boolean {
+  if (left.includes("*") || right.includes("*")) return true;
+  return left.some((method) => right.includes(method));
 }
 
 function prefixMatch(pathname: string, prefix: string): boolean {
@@ -124,9 +136,20 @@ function prefixMatch(pathname: string, prefix: string): boolean {
 }
 
 function methodMatch(method: string, methods: readonly string[] | undefined): boolean {
-  if (!methods || methods.length === 0) return true;
+  if (!methods || methods.length === 0 || methods.some((item) => item === "*")) return true;
   const upper = method.toUpperCase();
   return methods.some((item) => item.toUpperCase() === upper);
+}
+
+function parseHttpUrl(value: string, key: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${key} is invalid`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${key} must be http(s)`);
+  return url;
 }
 
 function required(env: NodeJS.ProcessEnv, key: string): string {

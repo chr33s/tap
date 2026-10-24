@@ -4,7 +4,7 @@ import https from "node:https";
 import { dirname } from "node:path";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
-import { TapError, isTapError, type Clock, type RequestData, type VerifiedAgent } from "tap";
+import { TapError, assertSafeRequestTarget, isLoopbackHost, isTapError, type Clock, type RequestData, type VerifiedAgent } from "tap";
 import { TapFailure, TapVerifierService, cachingRegistryResolverLayer, sqliteReplayLayer, tapVerifierLayer } from "tap-effect";
 
 import { matchRoute, type ProxyConfig } from "./config.js";
@@ -20,6 +20,9 @@ export interface ProxyHandle {
 type Runtime = ManagedRuntime.ManagedRuntime<TapVerifierService, never>;
 
 export async function startProxy(config: ProxyConfig, clock?: Clock): Promise<ProxyHandle> {
+  if (!isLoopbackHost(config.upstream.hostname) && !config.backendToken) {
+    throw new Error("TAP_BACKEND_TOKEN is required when the upstream is not a loopback host");
+  }
   if (config.replayDatabase !== ":memory:") mkdirSync(dirname(config.replayDatabase), { recursive: true });
   const dependencies = Layer.mergeAll(
     cachingRegistryResolverLayer({
@@ -68,6 +71,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, confi
     if (length !== undefined && length > config.bodyLimit) {
       return send(res, req, 413, { error: "malformed", code: "malformed" }, method, pathOnly);
     }
+    assertSafeRequestTarget(req.url ?? "/");
+    const body = await readLimitedBody(req, config.bodyLimit);
     const decision = matchRoute(pathOnly, method, config);
     if (decision.kind === "unmatched") {
       return send(res, req, 403, { error: "verification_failed", code: "policy" }, method, pathOnly);
@@ -80,6 +85,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, confi
       const onAborted = (): void => abort.abort();
       if (req.aborted) abort.abort();
       req.on("aborted", onAborted);
+      res.on("close", () => {
+        if (!res.writableEnded) onAborted();
+      });
       try {
         verified = await runtime.runPromise(
           Effect.gen(function* () {
@@ -95,8 +103,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, confi
         req.off("aborted", onAborted);
       }
     }
-    forward(req, res, config, verified, method, pathOnly);
+    forward(req, res, config, verified, method, pathOnly, body);
   } catch (error) {
+    if (isTapError(error) && error.reason === "payload too large") {
+      if (!res.headersSent) send(res, req, 413, { error: "malformed", code: "malformed" }, method, pathOnly);
+      return;
+    }
     const mapped = mapError(error);
     if (!res.headersSent) send(res, req, mapped.status, mapped.body, method, pathOnly);
     else res.destroy();
@@ -110,10 +122,22 @@ function forward(
   verified: VerifiedAgent | undefined,
   method: string,
   pathOnly: string,
+  body: Buffer,
 ): void {
   const headers = outgoingHeaders(req, config, verified);
+  if (body.length > 0) headers["content-length"] = body.length;
+  else delete headers["content-length"];
   const transport = config.upstream.protocol === "https:" ? https : http;
   const signal = AbortSignal.timeout(config.upstreamTimeoutMs);
+  let responded = false;
+  const fail = (status: number, code: string, error: string): void => {
+    if (responded || res.headersSent || res.writableEnded) {
+      if (!res.writableEnded) res.destroy();
+      return;
+    }
+    responded = true;
+    send(res, req, status, { error, code }, method, pathOnly);
+  };
   const upstreamReq = transport.request(
     {
       protocol: config.upstream.protocol,
@@ -125,29 +149,48 @@ function forward(
       signal,
     },
     (upstreamRes) => {
+      upstreamRes.on("error", () => fail(502, "bad_gateway", "bad_gateway"));
+      res.on("error", () => upstreamRes.destroy());
       const responseHeaders = { ...upstreamRes.headers };
       delete responseHeaders["transfer-encoding"];
       delete responseHeaders.connection;
+      if (responded || res.headersSent) {
+        upstreamRes.destroy();
+        return;
+      }
+      responded = true;
       res.writeHead(upstreamRes.statusCode ?? 502, responseHeaders);
       upstreamRes.pipe(res);
       log(method, pathOnly, upstreamRes.statusCode ?? 502);
     },
   );
-  let seen = 0;
-  req.on("data", (chunk: Buffer) => {
-    seen += chunk.length;
-    if (seen > config.bodyLimit) {
-      upstreamReq.destroy();
-      if (!res.headersSent) send(res, req, 413, { error: "malformed", code: "malformed" }, method, pathOnly);
-      else res.destroy();
-    }
-  });
   req.on("aborted", () => upstreamReq.destroy());
-  upstreamReq.on("error", () => {
-    if (!res.headersSent) send(res, req, 502, { error: "bad_gateway", code: "bad_gateway" }, method, pathOnly);
-    else res.destroy();
-  });
-  req.pipe(upstreamReq);
+  upstreamReq.on("error", () => fail(502, "bad_gateway", "bad_gateway"));
+  upstreamReq.end(body);
+}
+
+async function readLimitedBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let seen = 0;
+  let tooLarge = false;
+  try {
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      seen += buf.length;
+      if (seen > limit) {
+        tooLarge = true;
+        break;
+      }
+      chunks.push(buf);
+    }
+  } catch (error) {
+    if (tooLarge) throw new TapError("malformed", "payload too large");
+    if (req.aborted) throw new TapError("cancelled", "operation aborted");
+    throw error;
+  }
+  if (tooLarge) throw new TapError("malformed", "payload too large");
+  if (req.aborted) throw new TapError("cancelled", "operation aborted");
+  return Buffer.concat(chunks);
 }
 
 function externalRequest(req: http.IncomingMessage, config: ProxyConfig): RequestData {
@@ -191,6 +234,7 @@ function outgoingHeaders(
     headers["x-tap-agent-id"] = verified.agentId;
     headers["x-tap-key-id"] = verified.keyId;
     headers["x-tap-tag"] = verified.tag;
+    headers["x-tap-covered"] = verified.coveredComponents.join(",");
   }
   if (config.backendToken) headers["x-tap-backend-token"] = config.backendToken;
   return headers;
@@ -225,8 +269,9 @@ function send(
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
   });
-  res.end(payload);
-  req.destroy();
+  res.end(payload, () => {
+    if (!req.destroyed) req.destroy();
+  });
   log(method, pathOnly, status, body.code);
 }
 

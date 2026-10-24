@@ -19,10 +19,31 @@ export interface ParsedTarget {
   legacyPath: string;
 }
 
-const URL_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?(?:#.*)?$/;
+const URL_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?$/;
+
+/**
+ * Rejects request targets whose path is not the path a normalizing server
+ * would route. Fragments and backslashes are not part of an origin-form
+ * target. `.` and `..` segments, including `%2e`, change meaning under
+ * WHATWG URL parsing.
+ */
+export function assertSafeRequestTarget(requestTarget: string): void {
+  if (requestTarget.length === 0 || requestTarget.length > 8_192) {
+    throw tapError("malformed", "invalid request target");
+  }
+  if (!requestTarget.startsWith("/")) throw tapError("malformed", "invalid request target");
+  if (requestTarget.includes("#") || requestTarget.includes("\\")) {
+    throw tapError("malformed", "request target contains a fragment or backslash");
+  }
+  const path = requestTarget.split("?")[0] ?? requestTarget;
+  assertNoDotSegments(path);
+}
 
 export function parseTarget(url: string): ParsedTarget {
   if (url.length > 8_192) throw tapError("malformed", "url is too long");
+  if (url.includes("#") || url.includes("\\")) {
+    throw tapError("malformed", "request target contains a fragment or backslash");
+  }
   const match = URL_RE.exec(url);
   if (!match) throw tapError("malformed", "url must be an absolute http(s) URL");
   const schemeRaw = match[1];
@@ -38,6 +59,7 @@ export function parseTarget(url: string): ParsedTarget {
     throw tapError("malformed", "url contains a control character or space");
   }
   if (path !== "" && !path.startsWith("/")) throw tapError("malformed", "url path must be empty or absolute");
+  assertNoDotSegments(path);
   return {
     scheme,
     rawAuthority: authority,
@@ -141,6 +163,18 @@ function headerComponent(headers: ReadonlyArray<readonly [string, string]>, name
     return value.replace(/^[ \t]+|[ \t]+$/g, "");
   });
   return normalized.join(", ");
+}
+
+function assertNoDotSegments(path: string): void {
+  for (const segment of path.split("/")) {
+    if (segment.length === 0) continue;
+    const decoded = segment.replace(/%([0-9A-Fa-f]{2})/g, (_match, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    );
+    if (decoded === "." || decoded === "..") {
+      throw tapError("malformed", "request target contains a dot segment");
+    }
+  }
 }
 
 export function buildSignatureBase(components: ReadonlyArray<readonly [string, string]>, signatureParams: string): string {
