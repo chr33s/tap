@@ -4,8 +4,8 @@ import https from "node:https";
 import { dirname } from "node:path";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
-import { TapError, assertSafeRequestTarget, isLoopbackHost, isTapError, type Clock, type RequestData, type VerifiedAgent } from "tap";
-import { TapFailure, TapVerifierService, cachingRegistryResolverLayer, sqliteReplayLayer, tapVerifierLayer } from "tap-effect";
+import { TapError, assertSafeRequestTarget, isLoopbackHost, isTapError, type Clock, type RequestData, type VerifiedAgent } from "@chr33s/tap";
+import { TapFailure, TapVerifierService, cachingRegistryResolverLayer, sqliteReplayLayer, tapVerifierLayer } from "@chr33s/tap-effect";
 
 import { matchRoute, type ProxyConfig } from "./config.js";
 

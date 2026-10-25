@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createManualClock, createSigner, createTapClient, generateKeyPair, type ManualClock } from "tap";
+import { createManualClock, createSigner, createTapClient, generateKeyPair, type ManualClock } from "@chr33s/tap";
 
 import { loadProxyConfig, matchRoute, type ProxyConfig } from "../src/config.ts";
 import { startProxy, type ProxyHandle } from "../src/server.ts";

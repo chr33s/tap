@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
-import { TapError, createSigner, createTapClient, generateKeyPair, type KeyResolver, type ReplayStore } from "tap";
+import { TapError, createSigner, createTapClient, generateKeyPair, type KeyResolver, type ReplayStore } from "@chr33s/tap";
 import {
   KeyResolverService,
   ReplayStoreService,
@@ -14,7 +14,7 @@ import {
   tapVerifierFromPromises,
   tapVerifierLayer,
   toTapFailure,
-} from "tap-effect";
+} from "@chr33s/tap-effect";
 
 import { originsFor, runConformance, type ConformanceApi } from "../../tap/test/conformance.ts";
 

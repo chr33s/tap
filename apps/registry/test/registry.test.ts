@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { generateKeyPair } from "tap";
+import { generateKeyPair } from "@chr33s/tap";
 
 import { assertBindPolicy, startRegistry, type RegistryHandle } from "../src/server.ts";
 

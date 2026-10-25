@@ -12,7 +12,7 @@ import {
   createTapVerifier,
   generateKeyPair,
   type ResolvedKey,
-} from "tap";
+} from "@chr33s/tap";
 
 const require = createRequire(import.meta.url);
 const pinned = require("../../../fixtures/pinned-js-verifier.mjs") as {

@@ -1,5 +1,5 @@
 import { Data } from "effect";
-import { isAbortError, isTapError, type TapErrorCode } from "tap";
+import { isAbortError, isTapError, type TapErrorCode } from "@chr33s/tap";
 
 export class TapFailure extends Data.TaggedError("TapFailure")<{
   readonly code: TapErrorCode;

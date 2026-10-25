@@ -1,6 +1,6 @@
 {
-  "name": "tap-proxy",
-  "version": "1.0.0",
+  "name": "@chr33s/tap-proxy",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "effect": "4.0.6",
-    "tap": "*",
-    "tap-effect": "*"
+    "@chr33s/tap": "*",
+    "@chr33s/tap-effect": "*"
   }
 }

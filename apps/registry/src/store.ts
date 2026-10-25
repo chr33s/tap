@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-import { canonicalPublicKey, isAlgorithm, type Algorithm } from "tap";
+import { canonicalPublicKey, isAlgorithm, type Algorithm } from "@chr33s/tap";
 
 const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
 const SQLITE_CONSTRAINT_UNIQUE = 2067;

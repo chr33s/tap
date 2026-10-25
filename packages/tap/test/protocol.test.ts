@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { assertSafeRequestTarget, parseTarget } from "tap";
+import { assertSafeRequestTarget, parseTarget } from "@chr33s/tap";
 
 import { parseDictionary } from "../src/sfv.ts";
 import { promiseApi, runConformance } from "./conformance.ts";

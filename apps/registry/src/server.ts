@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { Context, Effect, Layer, ManagedRuntime, Schema } from "effect";
-import { assertKeyId, isLoopbackHost } from "tap";
+import { assertKeyId, isLoopbackHost } from "@chr33s/tap";
 
 import { HttpReply } from "./http-error.js";
 import {

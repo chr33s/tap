@@ -1,6 +1,6 @@
 {
-  "name": "tap",
-  "version": "1.0.0",
+  "name": "@chr33s/tap",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {

@@ -12,7 +12,7 @@ import {
   type ProfileName,
   type RequestData,
   generateKeyPair,
-} from "tap";
+} from "@chr33s/tap";
 
 interface Args {
   command: string;

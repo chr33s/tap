@@ -24,7 +24,7 @@ import {
   type TapVerifierOptions,
   type VerifiedAgent,
   type VerifyOptions,
-} from "tap";
+} from "@chr33s/tap";
 
 import { TapFailure, toTapFailure } from "./errors.js";
 

@@ -18,7 +18,7 @@ import {
   type SignatureHeaders,
   type VerifiedAgent,
   type VerifyOptions,
-} from "tap";
+} from "@chr33s/tap";
 
 const SEED = "uGx6XjUWoeo2uCUokFS83WvEKev+FYRsmGZQOdGYBSw=";
 const PUBLIC_KEY = "IvsH6xEgJSeC9U4IsQanNtetaYi6BUiNarA0N04rN2s=";
@@ -362,7 +362,7 @@ export function promiseApi(): ConformanceApi {
       return client.signRequest(input.request, input.options);
     },
     async verify(input) {
-      const { createTapVerifier } = await import("tap");
+      const { createTapVerifier } = await import("@chr33s/tap");
       const verifier = createTapVerifier({
         profile: input.profile,
         resolver: input.resolver,

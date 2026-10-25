@@ -1,5 +1,5 @@
 {
-  "name": "trusted-agent-protocol",
+  "name": "@chr33s/trusted-agent-protocol",
   "private": true,
   "type": "module",
   "engines": {

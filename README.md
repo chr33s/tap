@@ -77,8 +77,8 @@ npm run tap-agent -- send --key-file ./tap-keys/ed25519.private --key-id agent-k
 ## Library
 
 ```ts
-import { createSigner, createTapClient } from "tap/client";
-import { createRegistryKeyResolver, createSqliteReplayStore, createTapVerifier } from "tap/server";
+import { createSigner, createTapClient } from "@chr33s/tap/client";
+import { createRegistryKeyResolver, createSqliteReplayStore, createTapVerifier } from "@chr33s/tap/server";
 ```
 
 `createTapVerifier` and `tapVerifierLayer` require `origins`, the origins the verifier serves (`["https://shop.example"]`); a signature for any other `@authority` fails with `policy` before the key lookup. `RequestData.url` is the absolute URL with the original path and query encoding. Pass an `AbortSignal` through sign, verify, resolve, and claim. Effect hosts should build one `ManagedRuntime` from `tap-effect` and run each request on it. The Effect verifier calls the same `verifyRequest` pipeline as the promise API. The registry resolver retries network errors, timeouts, and `5xx` responses with a short doubling backoff; `401`/`403`, redirects, and unparseable key documents are deterministic, so they are not retried and are cached as misses for the key TTL. Replay claims are not retried.

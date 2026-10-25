@@ -14,7 +14,7 @@ import {
   createTapVerifier,
   generateKeyPair,
   type ResolvedKey,
-} from "tap";
+} from "@chr33s/tap";
 
 test("sqlite replay survives restart and invalid signatures do not consume nonces", async () => {
   const pair = generateKeyPair("ed25519");

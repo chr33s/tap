@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { TapError, isLoopbackHost, isProfile, MAX_KEY_CACHE_TTL_MS, normalizeOrigin, normalizeRegistryUrl, type ProfileName } from "tap";
+import { TapError, isLoopbackHost, isProfile, MAX_KEY_CACHE_TTL_MS, normalizeOrigin, normalizeRegistryUrl, type ProfileName } from "@chr33s/tap";
 
 const Tag = Schema.Literals(["agent-browser-auth", "agent-payer-auth"]);
 

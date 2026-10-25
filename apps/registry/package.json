@@ -1,6 +1,6 @@
 {
-  "name": "tap-registry",
-  "version": "1.0.0",
+  "name": "@chr33s/tap-registry",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,6 +8,6 @@
   },
   "dependencies": {
     "effect": "4.0.6",
-    "tap": "*"
+    "@chr33s/tap": "*"
   }
 }
