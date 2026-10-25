@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { startProxy } from "../apps/proxy/src/server.ts";
+import { testProxyConfig } from "../apps/proxy/test/config.ts";
 import { startRegistry } from "../apps/registry/src/server.ts";
 
 const TOKEN = "registry-admin-token";
@@ -56,25 +57,17 @@ test("dev key, registry approval, and agent send reach the echo backend", async 
     assert.equal(response.status, 200);
   }
   const proxyPort = await freePort();
-  const proxy = await startProxy({
-    host: "127.0.0.1",
+  const proxy = await startProxy(testProxyConfig({
     port: proxyPort,
     upstream: new URL(echo.url),
     origins: [`http://127.0.0.1:${proxyPort}`],
     registryUrl: registry.url,
-    profile: "tap",
-    trustSource: `registry:${registry.url}`,
-    protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth" }],
     publicRoutes: [{ prefix: "/public" }],
     cacheTtlMs: 1_000,
     replayDatabase: join(directory, "replay.db"),
-    trustedProxies: [],
-    allowedSkewSeconds: 0,
     upstreamTimeoutMs: 2_000,
-    headerLimit: 16_384,
-    bodyLimit: 1_048_576,
     backendToken: "backend-secret",
-  });
+  }));
   try {
     const bodyFile = join(directory, "body.txt");
     writeFileSync(bodyFile, "order=1");

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import { throwIfAborted } from "./abort.js";
-import { tapError } from "./errors.js";
+import { isTapError, tapError } from "./errors.js";
 import type { Algorithm, Signer } from "./types.js";
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -61,6 +61,10 @@ export function createSigner(algorithm: Algorithm, privateKeyMaterial: string): 
   };
 }
 
+/**
+ * `false` for a signature that does not verify. Unusable key material is a
+ * `trust` error, so a misconfigured key is not reported as a bad signature.
+ */
 export function verifySignature(
   algorithm: Algorithm,
   publicKeyMaterial: string,
@@ -69,8 +73,10 @@ export function verifySignature(
 ): boolean {
   try {
     if (algorithm === "ed25519") {
-      if (signature.length !== 64) return false;
+      // Key first: a misconfigured key must surface as `trust` even when the
+      // signature is the wrong length.
       const key = loadEd25519Public(publicKeyMaterial);
+      if (signature.length !== 64) return false;
       return crypto.verify(null, Buffer.from(message), key, Buffer.from(signature));
     }
     const key = loadRsaPublic(publicKeyMaterial);
@@ -84,7 +90,8 @@ export function verifySignature(
       },
       Buffer.from(signature),
     );
-  } catch {
+  } catch (error) {
+    if (isTapError(error)) throw error;
     return false;
   }
 }
@@ -131,7 +138,12 @@ function loadEd25519Public(material: string): crypto.KeyObject {
   const trimmed = material.trim();
   if (trimmed.includes("PRIVATE KEY")) throw tapError("trust", "private keys are not accepted");
   if (trimmed.startsWith("-----BEGIN ")) {
-    const key = crypto.createPublicKey(trimmed);
+    let key: crypto.KeyObject;
+    try {
+      key = crypto.createPublicKey(trimmed);
+    } catch {
+      throw tapError("trust", "invalid ed25519 public key");
+    }
     if (key.asymmetricKeyType !== "ed25519") throw tapError("trust", "public key is not ed25519");
     return key;
   }

@@ -1,14 +1,12 @@
 import { Context, Effect, Layer } from "effect";
 import {
   TapError,
-  assertAllowedSkew,
   createMemoryReplayStore,
   createRegistryKeyResolver,
   createSqliteReplayStore,
   createTapClient,
   mergeSignals,
-  normalizeOrigins,
-  systemClock,
+  normalizeVerifierOptions,
   verifyRequest,
   type ClaimResult,
   type Clock,
@@ -21,8 +19,8 @@ import {
   type SignOptions,
   type SignatureHeaders,
   type TapClientOptions,
-  type TapVerifierOptions,
   type VerifiedAgent,
+  type VerifierDeps,
   type VerifyOptions,
 } from "@chr33s/tap";
 
@@ -169,23 +167,18 @@ export function sqliteReplayLayer(filename: string, clock?: Clock): Layer.Layer<
   );
 }
 
-function verifierDeps(config: VerifierLayerConfig): Omit<TapVerifierOptions, "resolver" | "replay"> & {
-  clock: Clock;
-  allowedSkewSeconds: number;
-} {
-  const allowedSkewSeconds = config.allowedSkewSeconds ?? 0;
-  assertAllowedSkew(allowedSkewSeconds);
-  if (config.trustSource.trim().length === 0) throw new TapError("policy", "trust source is required");
-  return {
+/** The core's option policy, so this layer and `createTapVerifier` cannot drift. */
+function verifierDeps(config: VerifierLayerConfig): Omit<VerifierDeps, "resolver" | "replay"> {
+  return normalizeVerifierOptions({
     profile: config.profile,
     trustSource: config.trustSource,
-    origins: normalizeOrigins(config.origins),
-    clock: config.clock ?? systemClock,
-    allowedSkewSeconds,
-  };
+    origins: config.origins,
+    clock: config.clock,
+    allowedSkewSeconds: config.allowedSkewSeconds,
+  });
 }
 
-function promiseVerifier(deps: TapVerifierOptions & { clock: Clock; allowedSkewSeconds: number }) {
+function promiseVerifier(deps: VerifierDeps) {
   return {
     verifyRequest: (request: RequestData, options: VerifyOptions) =>
       Effect.tryPromise({

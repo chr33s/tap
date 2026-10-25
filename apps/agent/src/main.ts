@@ -2,6 +2,9 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import {
+  ALGORITHMS,
+  INTENT_TAGS,
+  PROFILES,
   createSigner,
   createTapClient,
   isAlgorithm,
@@ -163,17 +166,17 @@ function headerPairs(values: readonly string[]): Array<[string, string]> {
 }
 
 function algorithm(value: string): Algorithm {
-  if (!isAlgorithm(value)) throw new Error("algorithm must be ed25519 or rsa-pss-sha256");
+  if (!isAlgorithm(value)) throw new Error(`algorithm must be ${ALGORITHMS.join(" or ")}`);
   return value;
 }
 
 function profileName(value: string): ProfileName {
-  if (!isProfile(value)) throw new Error("profile must be tap or legacySample");
+  if (!isProfile(value)) throw new Error(`profile must be ${PROFILES.join(" or ")}`);
   return value;
 }
 
 function intent(value: string): IntentTag {
-  if (!isIntentTag(value)) throw new Error("tag must be agent-browser-auth or agent-payer-auth");
+  if (!isIntentTag(value)) throw new Error(`tag must be ${INTENT_TAGS.join(" or ")}`);
   return value;
 }
 

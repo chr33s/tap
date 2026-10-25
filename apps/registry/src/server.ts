@@ -6,13 +6,12 @@ import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { Context, Effect, Layer, ManagedRuntime, Schema } from "effect";
-import { assertKeyId, isLoopbackHost } from "@chr33s/tap";
+import { ALGORITHMS, assertKeyId, isLoopbackHost } from "@chr33s/tap";
 
 import { HttpReply } from "./http-error.js";
 import {
   StoreFailure,
   addKey,
-  deactivateAgent,
   getPublicAgent,
   listPublicAgents,
   lookupKey,
@@ -27,7 +26,7 @@ import {
 } from "./store.js";
 
 const Active = Schema.Literals(["true", "false"]);
-const AlgorithmName = Schema.Literals(["ed25519", "rsa-pss-sha256"]);
+const AlgorithmName = Schema.Literals(ALGORITHMS);
 
 const KeyBody = Schema.Struct({
   key_id: Schema.String,
@@ -167,7 +166,7 @@ function handle(req: http.IncomingMessage, options: RegistryOptions): Effect.Eff
       return yield* attempt(() => {
         const agentPath = /^\/agents\/([1-9][0-9]*)$/.exec(url.pathname);
         if (!agentPath?.[1]) return { status: 404, body: { error: "not_found", message: "not found" } };
-        deactivateAgent(db, Number(agentPath[1]), now);
+        updateAgent(db, Number(agentPath[1]), { isActive: false }, now);
         return { status: 200, body: { message: "agent deactivated" } };
       });
     }
@@ -257,7 +256,6 @@ function storeReply(failure: StoreFailure): HttpReply {
       return new HttpReply({ status: 409, body: { error: "conflict", message: failure.message } });
     case "invalid":
       return new HttpReply({ status: 400, body: { error: "malformed", message: failure.message } });
-    case "ambiguous":
     case "internal":
       return new HttpReply({ status: 500, body: { error: "internal", message: failure.message } });
   }

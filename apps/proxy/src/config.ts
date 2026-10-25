@@ -1,7 +1,7 @@
 import { Schema } from "effect";
-import { TapError, isLoopbackHost, isProfile, MAX_KEY_CACHE_TTL_MS, normalizeOrigin, normalizeRegistryUrl, type ProfileName } from "@chr33s/tap";
+import { INTENT_TAGS, PROFILES, TapError, isLoopbackHost, isProfile, MAX_KEY_CACHE_TTL_MS, normalizeOrigin, normalizeRegistryUrl, type ProfileName } from "@chr33s/tap";
 
-const Tag = Schema.Literals(["agent-browser-auth", "agent-payer-auth"]);
+const Tag = Schema.Literals(INTENT_TAGS);
 
 export const ProtectedRouteSchema = Schema.Struct({
   prefix: Schema.String,
@@ -38,6 +38,11 @@ export interface ProxyConfig {
   trustedProxies: readonly string[];
   allowedSkewSeconds: number;
   upstreamTimeoutMs: number;
+  /**
+   * How long a client may take to finish sending its headers before `408`.
+   * The whole request must arrive within `max(this, upstreamTimeoutMs + 5000)`.
+   */
+  headersTimeoutMs: number;
   headerLimit: number;
   bodyLimit: number;
   backendToken?: string;
@@ -45,14 +50,12 @@ export interface ProxyConfig {
 
 export function loadProxyConfig(env: NodeJS.ProcessEnv): ProxyConfig {
   const upstreamRaw = required(env, "UPSTREAM_URL");
-  const registryUrl = required(env, "REGISTRY_URL");
-  normalizeRegistryUrl(registryUrl);
+  // Normalized here so the default trust source names the registry the same
+  // way the resolver does, whatever spelling the environment used.
+  const registryUrl = normalizeRegistryUrl(required(env, "REGISTRY_URL"));
   const profileRaw = env.TAP_PROFILE ?? "tap";
-  if (!isProfile(profileRaw)) throw new Error("TAP_PROFILE must be tap or legacySample");
+  if (!isProfile(profileRaw)) throw new Error(`TAP_PROFILE must be ${PROFILES.join(" or ")}`);
   const upstream = parseHttpUrl(upstreamRaw, "UPSTREAM_URL");
-  if (!isLoopbackHost(upstream.hostname) && !env.TAP_BACKEND_TOKEN) {
-    throw new Error("TAP_BACKEND_TOKEN is required when the upstream is not a loopback host");
-  }
   const origins = required(env, "TAP_ORIGINS").split(",").map((item) => item.trim()).filter((item) => item.length > 0)
     .map(parseOrigin);
   if (origins.length === 0) throw new Error("TAP_ORIGINS is required");
@@ -75,10 +78,23 @@ export function loadProxyConfig(env: NodeJS.ProcessEnv): ProxyConfig {
     trustedProxies: (env.TAP_TRUSTED_PROXIES ?? "").split(",").map((item) => item.trim()).filter((item) => item.length > 0),
     allowedSkewSeconds: boundedInt(env.TAP_ALLOWED_SKEW_SECONDS, 0, 0, 60),
     upstreamTimeoutMs: boundedInt(env.TAP_UPSTREAM_TIMEOUT_MS, 10_000, 1, 120_000),
+    headersTimeoutMs: boundedInt(env.TAP_HEADERS_TIMEOUT_MS, 10_000, 100, 60_000),
     headerLimit: boundedInt(env.TAP_HEADER_LIMIT, 16_384, 1024, 65_536),
     bodyLimit: boundedInt(env.TAP_BODY_LIMIT, 1_048_576, 1, 10_485_760),
     backendToken: env.TAP_BACKEND_TOKEN,
   };
+}
+
+/**
+ * A remote upstream can only tell proxied traffic from direct traffic by the
+ * injected backend token, so one is required off loopback. Enforced by
+ * `startProxy`, the one entry point every config (loaded or hand-built) goes
+ * through.
+ */
+export function assertUpstreamTrust(config: Pick<ProxyConfig, "upstream" | "backendToken">): void {
+  if (!isLoopbackHost(config.upstream.hostname) && !config.backendToken) {
+    throw new Error("TAP_BACKEND_TOKEN is required when the upstream is not a loopback host");
+  }
 }
 
 export type RouteDecision =
@@ -86,31 +102,26 @@ export type RouteDecision =
   | { kind: "protected"; route: ProtectedRoute }
   | { kind: "unmatched" };
 
+/** Longest matching prefix wins; a tie between two routes is unmatched. */
 export function matchRoute(pathname: string, method: string, config: Pick<ProxyConfig, "protectedRoutes" | "publicRoutes">): RouteDecision {
   const path = canonicalRoutePath(pathname);
-  const matches: Array<{ kind: "public" | "protected"; prefix: string; route?: ProtectedRoute }> = [];
+  const matches: Array<{ prefix: string; decision: RouteDecision }> = [];
   for (const route of config.protectedRoutes) {
     const prefix = routePrefix(route);
     if (prefixMatch(path, prefix) && methodMatch(method, route.methods)) {
-      matches.push({ kind: "protected", prefix, route });
+      matches.push({ prefix, decision: { kind: "protected", route } });
     }
   }
   for (const route of config.publicRoutes) {
     const prefix = routePrefix(route);
     if (prefixMatch(path, prefix) && methodMatch(method, route.methods)) {
-      matches.push({ kind: "public", prefix });
+      matches.push({ prefix, decision: { kind: "public" } });
     }
   }
   if (matches.length === 0) return { kind: "unmatched" };
   const bestLength = Math.max(...matches.map((match) => match.prefix.length));
   const best = matches.filter((match) => match.prefix.length === bestLength);
-  const kinds = new Set(best.map((match) => match.kind));
-  if (kinds.size !== 1 || best.length !== 1) return { kind: "unmatched" };
-  const winner = best[0];
-  if (!winner) return { kind: "unmatched" };
-  if (winner.kind === "public") return { kind: "public" };
-  if (!winner.route) return { kind: "unmatched" };
-  return { kind: "protected", route: winner.route };
+  return best.length === 1 && best[0] ? best[0].decision : { kind: "unmatched" };
 }
 
 const prefixes = new WeakMap<ProtectedRoute | PublicRoute, string>();
@@ -191,8 +202,13 @@ function validateRoutes(protectedRoutes: readonly ProtectedRoute[], publicRoutes
   }
 }
 
+/** An empty method list or any `*` entry means every method, as does no list at all. */
+function isWildcard(methods: readonly string[]): boolean {
+  return methods.length === 0 || methods.includes("*");
+}
+
 function methodSet(methods: readonly string[] | undefined): readonly string[] {
-  if (!methods || methods.length === 0 || methods.some((item) => item === "*")) return ["*"];
+  if (!methods || isWildcard(methods)) return ["*"];
   return [...new Set(methods.map((item) => item.toUpperCase()))];
 }
 
@@ -208,7 +224,7 @@ function prefixMatch(pathname: string, prefix: string): boolean {
 }
 
 function methodMatch(method: string, methods: readonly string[] | undefined): boolean {
-  if (!methods || methods.length === 0 || methods.some((item) => item === "*")) return true;
+  if (!methods || isWildcard(methods)) return true;
   const upper = method.toUpperCase();
   return methods.some((item) => item.toUpperCase() === upper);
 }

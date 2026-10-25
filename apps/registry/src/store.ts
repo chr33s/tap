@@ -6,7 +6,7 @@ import { canonicalPublicKey, isAlgorithm, type Algorithm } from "@chr33s/tap";
 const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
 const SQLITE_CONSTRAINT_UNIQUE = 2067;
 
-export type StoreFailureKind = "not_found" | "conflict" | "invalid" | "ambiguous" | "internal";
+export type StoreFailureKind = "not_found" | "conflict" | "invalid" | "internal";
 
 export class StoreFailure extends Error {
   readonly kind: StoreFailureKind;
@@ -122,17 +122,12 @@ export function openRegistryDatabase(filename: string): DatabaseSync {
   const applied = db.prepare("SELECT id FROM schema_migrations WHERE id = ?").get(MIGRATION_ID);
   if (!applied) {
     const sql = readFileSync(new URL("../migrations/001_init.sql", import.meta.url), "utf8");
-    db.exec("BEGIN IMMEDIATE");
     try {
-      db.exec(sql);
-      db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(MIGRATION_ID, nowSeconds());
-      db.exec("COMMIT");
+      transaction(db, () => {
+        db.exec(sql);
+        db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(MIGRATION_ID, nowSeconds());
+      });
     } catch (error) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        // Preserve the migration error.
-      }
       db.close();
       throw error;
     }
@@ -189,15 +184,6 @@ export function updateAgent(db: DatabaseSync, id: number, patch: AgentPatch, now
   });
 }
 
-export function deactivateAgent(db: DatabaseSync, id: number, now = nowSeconds()): void {
-  transaction(db, () => {
-    const row = agentById(db, id);
-    if (!row) fail("not_found", "agent not found");
-    db.prepare("UPDATE agents SET is_active = 0, updated_at = ? WHERE id = ?").run(now, id);
-    db.prepare("UPDATE agent_keys SET is_active = 0, updated_at = ? WHERE agent_id = ?").run(now, id);
-  });
-}
-
 export function addKey(db: DatabaseSync, agentId: number, input: KeyInput, now = nowSeconds()): KeyRecord {
   return transaction(db, () => {
     const agent = agentById(db, agentId);
@@ -213,9 +199,7 @@ export function updateKey(db: DatabaseSync, agentId: number, keyId: string, patc
   return transaction(db, () => {
     const agent = agentById(db, agentId);
     if (!agent) fail("not_found", "agent not found");
-    const rows = db.prepare("SELECT * FROM agent_keys WHERE key_id = ?").all(keyId).map(keyRow);
-    if (rows.length > 1) fail("ambiguous", "ambiguous key id");
-    const row = rows[0];
+    const row = keyById(db, keyId);
     if (!row || row.agent_id !== agentId) fail("not_found", "key not found");
     const active = patch.isActive === undefined ? row.is_active === 1 : patch.isActive;
     if (active && agent.is_active !== 1) fail("conflict", "agent is inactive");
@@ -231,16 +215,16 @@ export function updateKey(db: DatabaseSync, agentId: number, keyId: string, patc
 }
 
 export function lookupKey(db: DatabaseSync, keyId: string, agentId: number | undefined, now = nowSeconds()): PublicKeyRecord {
-  const rows = db.prepare(`
+  // `agent_keys.key_id` is UNIQUE, so at most one row matches.
+  const found = db.prepare(`
     SELECT k.key_id, k.public_key, k.algorithm, k.is_active, k.expires_at, k.description,
            k.agent_id, a.name AS agent_name, a.domain AS agent_domain, a.is_active AS agent_active
     FROM agent_keys k
     JOIN agents a ON a.id = k.agent_id
     WHERE k.key_id = ?
-  `).all(keyId).map(lookupRow);
-  if (rows.length > 1) fail("ambiguous", "ambiguous key id");
-  const row = rows[0];
-  if (!row) fail("not_found", "key not found");
+  `).get(keyId);
+  if (!found) fail("not_found", "key not found");
+  const row = lookupRow(found);
   if (agentId !== undefined && row.agent_id !== agentId) fail("not_found", "key not found");
   if (row.agent_active !== 1 || row.is_active !== 1) fail("not_found", "key not found");
   if (row.expires_at !== null && row.expires_at <= now) fail("not_found", "key not found");
@@ -296,10 +280,10 @@ function agentById(db: DatabaseSync, id: number): AgentRow | undefined {
   return row ? agentRow(row) : undefined;
 }
 
+/** `key_id` is UNIQUE, so this is a point lookup. */
 function keyById(db: DatabaseSync, keyId: string): KeyRow | undefined {
-  const rows = db.prepare("SELECT * FROM agent_keys WHERE key_id = ?").all(keyId).map(keyRow);
-  if (rows.length > 1) fail("ambiguous", "ambiguous key id");
-  return rows[0];
+  const row = db.prepare("SELECT * FROM agent_keys WHERE key_id = ?").get(keyId);
+  return row ? keyRow(row) : undefined;
 }
 
 function publicAgent(row: AgentRow, keys: KeyRecord[]): Omit<AgentRecord, "contact_email"> {

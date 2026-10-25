@@ -69,11 +69,9 @@ export async function signRequest(
   throwIfAborted(options.signal);
   const clock = options.clock ?? systemClock;
   const lifetime = options.lifetimeSeconds ?? MAX_SIGNATURE_LIFETIME_SECONDS;
-  if (!Number.isInteger(lifetime) || lifetime <= 0 || lifetime > MAX_SIGNATURE_LIFETIME_SECONDS) {
-    throw tapError("invalid_time", "signature lifetime must be between 1 and 480 seconds");
-  }
   const created = options.created ?? clock.now();
   const nonce = options.nonce ?? (options.nonceSource ?? randomNonce)();
+  // The lifetime bound is checked once, inside `createSignatureMaterial`.
   const material = createSignatureMaterial({
     request,
     profile: options.profile,

@@ -77,10 +77,8 @@ export function createSqliteReplayStore(filename: string, clock: Clock = systemC
     async claim(entry, signal) {
       throwIfAborted(signal);
       const now = clock.now();
-      if (!Number.isInteger(entry.until) || entry.until <= now) return "expired";
-      if (entry.trustSource.length === 0 || entry.keyId.length === 0 || entry.nonce.length === 0) {
-        throw tapError("store_unavailable", "replay claim is missing an identity");
-      }
+      const early = validateClaim(entry, now);
+      if (early) return early;
       try {
         db.exec("BEGIN IMMEDIATE");
         if (now > prunedAt) {
@@ -105,11 +103,23 @@ export function createSqliteReplayStore(filename: string, clock: Clock = systemC
   };
 }
 
-function claimInMap(claims: Map<string, number>, entry: ReplayClaim, now: number): ClaimResult {
+/**
+ * Shared `ReplayStore` contract: a claim whose deadline has passed is
+ * `expired` without touching storage, and a claim missing any part of its
+ * identity is a store failure. Returns the early result, or `undefined` when
+ * the store should go on to record the claim.
+ */
+function validateClaim(entry: ReplayClaim, now: number): ClaimResult | undefined {
   if (!Number.isInteger(entry.until) || entry.until <= now) return "expired";
   if (entry.trustSource.length === 0 || entry.keyId.length === 0 || entry.nonce.length === 0) {
     throw tapError("store_unavailable", "replay claim is missing an identity");
   }
+  return undefined;
+}
+
+function claimInMap(claims: Map<string, number>, entry: ReplayClaim, now: number): ClaimResult {
+  const early = validateClaim(entry, now);
+  if (early) return early;
   const id = claimId(entry);
   const existing = claims.get(id);
   if (existing !== undefined && existing > now) return "duplicate";

@@ -10,6 +10,7 @@ import { createManualClock, createSigner, createTapClient, generateKeyPair, type
 
 import { loadProxyConfig, matchRoute, type ProxyConfig } from "../src/config.ts";
 import { startProxy, type ProxyHandle } from "../src/server.ts";
+import { testProxyConfig } from "./config.ts";
 import { startRegistry, type RegistryHandle } from "../../registry/src/server.ts";
 
 const TOKEN = "registry-admin-token";
@@ -115,8 +116,10 @@ test("proxy verifies, forwards, replays, and honors revocation within the cache 
     assert.equal(malformed.status, 400);
     assert.equal(malformed.body.code, "malformed");
 
+    // Over the 2048-byte header limit: refused by the parser, still as JSON.
     const huge = await send(proxy, "GET", "/product/1", { "x-big": "a".repeat(3000) });
-    assert.equal(huge.status, 400);
+    assert.equal(huge.status, 431);
+    assert.equal(huge.body.code, "malformed");
 
     const tooBig = await send(proxy, "POST", "/product/1", { "content-length": "5000" }, "x".repeat(5000));
     assert.equal(tooBig.status, 413);
@@ -414,6 +417,27 @@ test("proxy rejects confusing targets, bounds the body before forwarding, and ig
   }
 });
 
+test("proxy answers a stalled header section with a JSON 408 and closes the connection", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tap-proxy-"));
+  const echo = await startEcho();
+  const proxy = await startProxy(await config(echo.url, "http://127.0.0.1:9", join(directory, "replay.db"), {
+    headersTimeoutMs: 200,
+    publicRoutes: [{ prefix: "/health" }],
+  }));
+  try {
+    // Headers never terminated: the parser times out before `handle` runs.
+    const stalled = await rawHttp(proxy.port, "GET /health HTTP/1.1\r\nhost: 127.0.0.1\r\n");
+    assert.equal(stalled.status, 408);
+    assert.deepEqual(JSON.parse(stalled.body), { error: "timeout", code: "timeout" });
+    // The server is still healthy for well-formed requests.
+    const ok = await send(proxy, "GET", "/health");
+    assert.equal(ok.status, 200);
+  } finally {
+    await proxy.close();
+    await echo.close();
+  }
+});
+
 test("proxy survives an upstream response reset", async () => {
   const directory = mkdtempSync(join(tmpdir(), "tap-proxy-reset-"));
   let calls = 0;
@@ -538,7 +562,15 @@ test("segment whitespace an upstream would trim cannot fall through to a shorter
   assert.equal(matchRoute("/products/my%20item", "GET", routes).kind, "public");
 });
 
-test("proxy route policy treats star as every method and requires https and a backend token off loopback", () => {
+test("startProxy refuses a hand-built config with a remote upstream and no backend token", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tap-proxy-"));
+  await assert.rejects(
+    startProxy(await config("http://backend.example", "http://127.0.0.1:9", join(directory, "replay.db"), {})),
+    /TAP_BACKEND_TOKEN/,
+  );
+});
+
+test("proxy route policy treats star as every method and requires an https registry off loopback", () => {
   assert.equal(matchRoute("/product/2", "POST", {
     protectedRoutes: [{ prefix: "/product", tag: "agent-browser-auth", methods: ["*"] }],
     publicRoutes: [],
@@ -549,10 +581,6 @@ test("proxy route policy treats star as every method and requires https and a ba
     REGISTRY_URL: "http://127.0.0.1:9",
     TAP_PROTECTED_ROUTES: JSON.stringify([{ prefix: "/product", tag: "agent-browser-auth" }]),
   };
-  assert.throws(() => loadProxyConfig({
-    ...base,
-    UPSTREAM_URL: "http://backend.example",
-  }), /TAP_BACKEND_TOKEN/);
   assert.throws(() => loadProxyConfig({
     ...base,
     REGISTRY_URL: "http://registry.example",
@@ -573,7 +601,12 @@ test("proxy route policy treats star as every method and requires https and a ba
     TAP_BACKEND_TOKEN: "backend-secret",
   });
   assert.equal(loaded.backendToken, "backend-secret");
-  assert.equal(loaded.registryUrl, "https://registry.example");
+  assert.equal(loaded.registryUrl, "https://registry.example/");
+  // The default trust source is built from the normalized URL, so spelling
+  // differences in REGISTRY_URL do not fork the replay namespace.
+  assert.equal(loaded.trustSource, "registry:https://registry.example/");
+  assert.equal(loadProxyConfig({ ...base, REGISTRY_URL: "http://127.0.0.1:9/" }).trustSource, "registry:http://127.0.0.1:9/");
+  assert.equal(loadProxyConfig({ ...base, REGISTRY_URL: "http://127.0.0.1:9" }).trustSource, "registry:http://127.0.0.1:9/");
 });
 
 function clientFor(keyId: string, privateKey: string, clock: ManualClock) {
@@ -601,25 +634,7 @@ async function signedSend(
 
 async function config(upstream: string, registryUrl: string, replayDatabase: string, extra: Partial<ProxyConfig>): Promise<ProxyConfig> {
   const port = extra.port ?? await freePort();
-  return {
-    host: "127.0.0.1",
-    port,
-    upstream: new URL(upstream),
-    origins: extra.origins ?? [`http://127.0.0.1:${port}`, "https://shop.example"],
-    registryUrl,
-    profile: "tap",
-    trustSource: `registry:${registryUrl}`,
-    protectedRoutes: extra.protectedRoutes ?? [{ prefix: "/product", tag: "agent-browser-auth" }],
-    publicRoutes: extra.publicRoutes ?? [],
-    cacheTtlMs: extra.cacheTtlMs ?? 0,
-    replayDatabase,
-    trustedProxies: extra.trustedProxies ?? [],
-    allowedSkewSeconds: extra.allowedSkewSeconds ?? 0,
-    upstreamTimeoutMs: extra.upstreamTimeoutMs ?? 1_000,
-    headerLimit: extra.headerLimit ?? 16_384,
-    bodyLimit: extra.bodyLimit ?? 1_048_576,
-    backendToken: extra.backendToken,
-  };
+  return testProxyConfig({ ...extra, port, upstream: new URL(upstream), registryUrl, replayDatabase });
 }
 
 async function registerActive(registry: RegistryHandle, keyId: string, publicKey: string): Promise<number> {

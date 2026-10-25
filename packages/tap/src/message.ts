@@ -44,16 +44,19 @@ export interface ParsedSignature extends SignatureMaterial {
 }
 
 export function assertTimeWindow(created: number, expires: number, now: number, skewSeconds: number): void {
-  if (!Number.isInteger(created) || !Number.isInteger(expires) || !Number.isInteger(now) || !Number.isInteger(skewSeconds)) {
-    throw tapError("invalid_time", "timestamps must be integers");
-  }
+  assertLifetime(created, expires);
+  if (!Number.isInteger(now) || !Number.isInteger(skewSeconds)) throw tapError("invalid_time", "timestamps must be integers");
   if (skewSeconds < 0) throw tapError("policy", "clock skew must be non-negative");
-  const lifetime = expires - created;
-  if (lifetime <= 0 || lifetime > MAX_SIGNATURE_LIFETIME_SECONDS) {
-    throw tapError("invalid_time", "signature lifetime must be between 1 and 480 seconds");
-  }
   if (now < created - skewSeconds || now >= expires + skewSeconds) {
     throw tapError("invalid_time", "signature is outside its validity window");
+  }
+}
+
+/** `expires - created` must be an integer from 1 to `MAX_SIGNATURE_LIFETIME_SECONDS`. */
+export function assertLifetime(created: number, expires: number): void {
+  const lifetime = expires - created;
+  if (!Number.isInteger(created) || !Number.isInteger(expires) || lifetime <= 0 || lifetime > MAX_SIGNATURE_LIFETIME_SECONDS) {
+    throw tapError("invalid_time", `signature lifetime must be between 1 and ${MAX_SIGNATURE_LIFETIME_SECONDS} seconds`);
   }
 }
 
@@ -73,10 +76,7 @@ export function createSignatureMaterial(input: {
   assertNonce(input.nonce);
   if (!isIntentTag(input.tag)) throw tapError("policy", "unsupported intent tag");
   assertAlgorithm(input.profile, input.alg);
-  const lifetime = input.expires - input.created;
-  if (!Number.isInteger(input.created) || !Number.isInteger(input.expires) || lifetime <= 0 || lifetime > MAX_SIGNATURE_LIFETIME_SECONDS) {
-    throw tapError("invalid_time", "signature lifetime must be between 1 and 480 seconds");
-  }
+  assertLifetime(input.created, input.expires);
   const target = parseTarget(input.request.url);
   if (input.request.method.length === 0) throw tapError("malformed", "method is empty");
   const values = input.components.map((name) => [name, componentValue(input.request, target, name, input.profile)] as const);

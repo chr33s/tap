@@ -47,20 +47,33 @@ export function normalizeOrigins(origins: readonly string[] | undefined): string
   return [...new Set(origins.map(normalizeOrigin))];
 }
 
-export function createTapVerifier(options: TapVerifierOptions): TapVerifier {
+/** Verifier options with every default applied and every policy check done. */
+export type VerifierDeps = TapVerifierOptions & { clock: Clock; allowedSkewSeconds: number };
+
+/**
+ * Applies the verifier's option policy once: a non-empty trust source,
+ * normalized origins, a bounded skew, and a default clock. Every host that
+ * calls `verifyRequest` directly goes through this.
+ */
+export function normalizeVerifierOptions<T extends Omit<TapVerifierOptions, "resolver" | "replay">>(
+  options: T,
+): T & { origins: string[]; clock: Clock; allowedSkewSeconds: number } {
   if (options.trustSource.trim().length === 0) throw tapError("policy", "trust source is required");
-  const origins = normalizeOrigins(options.origins);
-  const skew = options.allowedSkewSeconds ?? 0;
-  assertAllowedSkew(skew);
-  const clock = options.clock ?? systemClock;
+  const allowedSkewSeconds = options.allowedSkewSeconds ?? 0;
+  assertAllowedSkew(allowedSkewSeconds);
+  return {
+    ...options,
+    origins: normalizeOrigins(options.origins),
+    allowedSkewSeconds,
+    clock: options.clock ?? systemClock,
+  };
+}
+
+export function createTapVerifier(options: TapVerifierOptions): TapVerifier {
+  const deps = normalizeVerifierOptions(options);
   return {
     verifyRequest(request, verifyOptions) {
-      return verifyRequest(request, verifyOptions, {
-        ...options,
-        origins,
-        allowedSkewSeconds: skew,
-        clock,
-      });
+      return verifyRequest(request, verifyOptions, deps);
     },
   };
 }
@@ -68,7 +81,7 @@ export function createTapVerifier(options: TapVerifierOptions): TapVerifier {
 export async function verifyRequest(
   request: RequestData,
   verifyOptions: VerifyOptions,
-  deps: TapVerifierOptions & { clock: Clock; allowedSkewSeconds: number },
+  deps: VerifierDeps,
 ): Promise<VerifiedAgent> {
   throwIfAborted(verifyOptions.signal);
   const target = parseTarget(request.url);
@@ -107,14 +120,9 @@ export async function verifyRequest(
   if (key.agentId.length === 0 || key.agentDomain.length === 0) throw tapError("trust", "resolved agent identity is incomplete");
   if (key.expiresAt !== null && key.expiresAt <= now()) throw tapError("trust", "key is expired");
 
-  let valid = false;
-  try {
-    valid = cryptographicVerify(parsed, key.publicKey);
-  } catch (error) {
-    if (isTapError(error) && error.code === "trust") throw error;
-    valid = false;
-  }
-  if (!valid) throw tapError("invalid_signature", "signature verification failed");
+  // Unusable key material surfaces as `trust`; only a signature that does not
+  // verify under a usable key is `invalid_signature`.
+  if (!cryptographicVerify(parsed, key.publicKey)) throw tapError("invalid_signature", "signature verification failed");
 
   const until = parsed.expires + deps.allowedSkewSeconds;
   let claim;

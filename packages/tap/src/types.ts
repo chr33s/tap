@@ -120,13 +120,13 @@ export interface TapVerifier {
 }
 
 export function isIntentTag(value: string): value is IntentTag {
-  return value === "agent-browser-auth" || value === "agent-payer-auth";
+  return (INTENT_TAGS as readonly string[]).includes(value);
 }
 
 export function isAlgorithm(value: string): value is Algorithm {
-  return value === "ed25519" || value === "rsa-pss-sha256";
+  return (ALGORITHMS as readonly string[]).includes(value);
 }
 
 export function isProfile(value: string): value is ProfileName {
-  return value === "tap" || value === "legacySample";
+  return (PROFILES as readonly string[]).includes(value);
 }

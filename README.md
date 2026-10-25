@@ -60,7 +60,9 @@ Protected routes name the expected tag and any extra covered components. Omit `m
 
 Key lookups are cached for at most `min(TAP_CACHE_TTL_MS, 30000, key expires_at)` milliseconds. That is the longest revocation can lag. After the entry expires, a registry failure is an error; the proxy does not reuse the stale key. The proxy admits each nonce once in its SQLite replay store. A backend behind the proxy should trust the injected headers and should not admit the nonce again. A backend without this proxy should call `createTapVerifier` from `tap/server` and admit nonces itself.
 
-`400` malformed input, `413` when the body exceeds the limit, `403` failed or missing verification, `503` registry or replay store unavailable, `502` upstream failure. Forwarded requests are not retried.
+`400` malformed input, `431` when the header section exceeds `TAP_HEADER_LIMIT`, `408` (code `timeout`) when the client did not finish sending its headers within `TAP_HEADERS_TIMEOUT_MS` or the whole request within `max(TAP_HEADERS_TIMEOUT_MS, TAP_UPSTREAM_TIMEOUT_MS + 5000)`, `413` when the body exceeds the limit, `403` failed or missing verification, `503` registry or replay store unavailable, `502` upstream failure. Forwarded requests are not retried.
+
+`TAP_TRUST_SOURCE` is the replay namespace. When unset it defaults to `registry:` followed by the normalized `REGISTRY_URL` (trailing slash, no query or fragment), so `https://r.example` and `https://r.example/` name the same namespace. Set it explicitly in production: a changed value starts a fresh namespace, and nonces admitted under the old one are not seen there.
 
 ## Agent
 

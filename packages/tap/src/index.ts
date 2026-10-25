@@ -45,4 +45,12 @@ export {
   type VerifyOptions,
 } from "./types.js";
 export { createTapClient, randomNonce, signRequest, type TapClientOptions } from "./client.js";
-export { assertAllowedSkew, createTapVerifier, normalizeOrigins, verifyRequest, type TapVerifierOptions } from "./verifier.js";
+export {
+  assertAllowedSkew,
+  createTapVerifier,
+  normalizeOrigins,
+  normalizeVerifierOptions,
+  verifyRequest,
+  type TapVerifierOptions,
+  type VerifierDeps,
+} from "./verifier.js";

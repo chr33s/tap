@@ -226,9 +226,7 @@ export async function fetchRegistryKey(input: {
       signal,
     });
   } catch (error) {
-    if (input.signal?.aborted || isAbortError(error) && input.signal?.aborted) {
-      throw tapError("cancelled", "operation aborted");
-    }
+    if (input.signal?.aborted) throw tapError("cancelled", "operation aborted");
     if (isAbortError(error)) throw tapError("resolver_unavailable", TRANSIENT_TIMEOUT);
     throw tapError("resolver_unavailable", TRANSIENT_NETWORK);
   }
@@ -267,7 +265,7 @@ export function parseRegistryKey(body: unknown, nowSeconds: number): ResolvedKey
     canonical = canonicalPublicKey(algorithmRaw, publicKey);
     assertPublicKey(algorithmRaw, canonical);
   } catch (error) {
-    if (isTapTrust(error)) throw error;
+    if (isCacheableMiss(error)) throw error;
     throw tapError("trust", "invalid public key");
   }
   return {
@@ -348,8 +346,4 @@ function isTransient(error: unknown): boolean {
 /** Deterministic registry answers: unknown or unusable keys and bad documents. */
 function isCacheableMiss(error: unknown): boolean {
   return isTapError(error) && (error.code === "trust" || error.code === "resolver_unavailable");
-}
-
-function isTapTrust(error: unknown): boolean {
-  return error instanceof Error && "code" in error && (error.code === "trust" || error.code === "resolver_unavailable");
 }

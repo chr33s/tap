@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { assertSafeRequestTarget, parseTarget } from "@chr33s/tap";
+import { assertSafeRequestTarget, parseTarget, verifySignature } from "@chr33s/tap";
 
 import { parseDictionary } from "../src/sfv.ts";
 import { promiseApi, runConformance } from "./conformance.ts";
@@ -31,6 +31,16 @@ test("request targets reject fragments, backslashes, and dot segments", () => {
   assert.throws(() => assertSafeRequestTarget("/a?b\\c"), /backslash/);
   assert.throws(() => assertSafeRequestTarget("/a\tb"), /control character/);
   assert.throws(() => assertSafeRequestTarget("product"), /invalid request target/);
+});
+
+test("unusable key material is a trust error even when the signature length is wrong", () => {
+  const message = new Uint8Array([1, 2, 3]);
+  assert.throws(() => verifySignature("ed25519", Buffer.alloc(31).toString("base64"), message, new Uint8Array(63)),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "trust");
+  assert.throws(() => verifySignature("ed25519", "-----BEGIN PUBLIC KEY-----\ngarbage\n-----END PUBLIC KEY-----", message, new Uint8Array(64)),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "trust");
+  assert.throws(() => verifySignature("rsa-pss-sha256", "not a key", message, new Uint8Array(10)),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "trust");
 });
 
 test("promise API conformance", async () => {

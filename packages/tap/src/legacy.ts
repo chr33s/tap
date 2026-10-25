@@ -32,14 +32,9 @@ export function parseLegacy(
   const fields = parseLegacyAttributes(match[2]);
   const sigMatch = /^sig2=:([A-Za-z0-9+/]+={0,2}):$/.exec(signatureHeader.trim());
   if (!sigMatch?.[1]) throw tapError("malformed", "legacy signature must be sig2=:base64:");
-  let signature: Buffer;
-  try {
-    signature = Buffer.from(sigMatch[1], "base64");
-    if (signature.toString("base64").replace(/=+$/, "") !== sigMatch[1].replace(/=+$/, "")) {
-      throw tapError("malformed", "invalid signature encoding");
-    }
-  } catch (error) {
-    if (error instanceof Error && error.name === "TapError") throw error;
+  // `Buffer.from(_, "base64")` never throws; a round trip catches non-canonical input.
+  const signature = Buffer.from(sigMatch[1], "base64");
+  if (signature.toString("base64").replace(/=+$/, "") !== sigMatch[1].replace(/=+$/, "")) {
     throw tapError("malformed", "invalid signature encoding");
   }
   const tag = fields.tag;

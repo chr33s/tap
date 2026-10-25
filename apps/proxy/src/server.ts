@@ -4,10 +4,10 @@ import https from "node:https";
 import { dirname } from "node:path";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
-import { TapError, assertSafeRequestTarget, isLoopbackHost, isTapError, type Clock, type RequestData, type VerifiedAgent } from "@chr33s/tap";
+import { TapError, assertSafeRequestTarget, isTapError, type Clock, type RequestData, type VerifiedAgent } from "@chr33s/tap";
 import { TapFailure, TapVerifierService, cachingRegistryResolverLayer, sqliteReplayLayer, tapVerifierLayer } from "@chr33s/tap-effect";
 
-import { matchRoute, type ProxyConfig } from "./config.js";
+import { assertUpstreamTrust, matchRoute, type ProxyConfig } from "./config.js";
 
 const HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "trailer"]);
 
@@ -19,10 +19,14 @@ export interface ProxyHandle {
 
 type Runtime = ManagedRuntime.ManagedRuntime<TapVerifierService, never>;
 
+/**
+ * The response currently owned by each socket, so `rejectUnparseable` can tell
+ * through public API whether anything is already on the wire.
+ */
+const responses = new WeakMap<import("node:net").Socket, http.ServerResponse>();
+
 export async function startProxy(config: ProxyConfig, clock?: Clock): Promise<ProxyHandle> {
-  if (!isLoopbackHost(config.upstream.hostname) && !config.backendToken) {
-    throw new Error("TAP_BACKEND_TOKEN is required when the upstream is not a loopback host");
-  }
+  assertUpstreamTrust(config);
   if (config.replayDatabase !== ":memory:") mkdirSync(dirname(config.replayDatabase), { recursive: true });
   const dependencies = Layer.mergeAll(
     cachingRegistryResolverLayer({
@@ -43,11 +47,25 @@ export async function startProxy(config: ProxyConfig, clock?: Clock): Promise<Pr
       allowedSkewSeconds: config.allowedSkewSeconds,
     }).pipe(Layer.provide(dependencies)),
   );
-  const server = http.createServer((req, res) => {
+  // The header limit and both timeouts are enforced by Node's parser, before
+  // any handler runs; expired connections surface as `clientError`. The whole
+  // request (headers and body) must arrive within the upstream timeout plus a
+  // margin, and never sooner than the headers timeout, so the configured value
+  // is honored exactly. Node only sweeps for expired connections every
+  // `connectionsCheckingInterval`, so that is tied to the headers timeout
+  // rather than left at its 30s default.
+  const headersTimeout = config.headersTimeoutMs;
+  const requestTimeout = Math.max(headersTimeout, config.upstreamTimeoutMs + 5_000);
+  const server = http.createServer({
+    maxHeaderSize: config.headerLimit,
+    requestTimeout,
+    headersTimeout,
+    connectionsCheckingInterval: Math.max(50, Math.ceil(headersTimeout / 2)),
+  }, (req, res) => {
+    responses.set(req.socket, res);
     void handle(req, res, config, runtime);
   });
-  server.requestTimeout = config.upstreamTimeoutMs + 5_000;
-  server.headersTimeout = 10_000;
+  server.on("clientError", rejectUnparseable);
   const port = await listen(server, config.host, config.port);
   return {
     port,
@@ -70,9 +88,6 @@ async function handle(
   const method = req.method ?? "GET";
   const pathOnly = (req.url ?? "/").split("?")[0] ?? "/";
   try {
-    if (headerBytes(req) > config.headerLimit) {
-      return send(res, req, 400, { error: "malformed", code: "malformed" }, method, pathOnly);
-    }
     const length = contentLength(req);
     if (length !== undefined && length > config.bodyLimit) throw new PayloadTooLarge();
     assertSafeRequestTarget(req.url ?? "/");
@@ -281,28 +296,55 @@ function send(
   method: string,
   pathOnly: string,
 ): void {
+  // The parser may already have answered on this socket (a request timeout
+  // mid-body is reported there first); nothing more can be delivered then.
+  if (res.destroyed || (res.socket ?? req.socket)?.destroyed) return;
   const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(payload),
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
-  });
+  res.writeHead(status, errorHeaders(payload));
   res.end(payload, () => {
     if (!req.destroyed) req.destroy();
   });
   log(method, pathOnly, status, body.code);
 }
 
-function headerBytes(req: http.IncomingMessage): number {
-  let size = 0;
-  for (const [name, value] of Object.entries(req.headers)) {
-    size += name.length;
-    if (Array.isArray(value)) size += value.join("").length;
-    else size += value?.length ?? 0;
+/**
+ * Requests Node's parser refuses never reach `handle`, so this keeps the JSON
+ * error contract for them: `431` when the header section exceeds the
+ * configured limit, `408` when the proxy's own header or request timeout
+ * fired, `400` for anything else malformed. Mirrors Node's default handler:
+ * nothing is written over a response already on the wire, and the socket is
+ * destroyed afterwards because the parser is dead and no server timeout
+ * applies to it any more.
+ */
+function rejectUnparseable(error: NodeJS.ErrnoException, socket: import("node:net").Socket): void {
+  const inflight = responses.get(socket);
+  if (error.code === "ECONNRESET" || !socket.writable || (inflight?.headersSent && !inflight.writableFinished)) {
+    socket.destroy();
+    return;
   }
-  return size;
+  const [status, text, code] = UNPARSEABLE[error.code ?? ""] ?? [400, "Bad Request", "malformed"];
+  const payload = JSON.stringify({ error: code, code });
+  const headers = Object.entries({ ...errorHeaders(payload), connection: "close" })
+    .map(([name, value]) => `${name}: ${value}\r\n`)
+    .join("");
+  socket.end(`HTTP/1.1 ${status} ${text}\r\n${headers}\r\n${payload}`, () => socket.destroy());
+  log("?", "?", status, code);
 }
+
+/** Headers every JSON error response carries, whether sent by `res` or raw. */
+function errorHeaders(payload: string): Record<string, string> {
+  return {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(Buffer.byteLength(payload)),
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  };
+}
+
+const UNPARSEABLE: Record<string, readonly [number, string, string]> = {
+  HPE_HEADER_OVERFLOW: [431, "Request Header Fields Too Large", "malformed"],
+  ERR_HTTP_REQUEST_TIMEOUT: [408, "Request Timeout", "timeout"],
+};
 
 function contentLength(req: http.IncomingMessage): number | undefined {
   const raw = singleHeader(req, "content-length");
