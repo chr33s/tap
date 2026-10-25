@@ -445,6 +445,74 @@ test("proxy survives an upstream response reset", async () => {
   }
 });
 
+test("the upstream timeout bounds time to headers, not a body that keeps streaming", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tap-proxy-stream-"));
+  const upstream = await listen((req, res) => {
+    req.resume();
+    if (req.url === "/stall") return; // never answers
+    res.writeHead(200, { "content-type": "text/plain" });
+    let sent = 0;
+    const timer = setInterval(() => {
+      sent += 1;
+      res.write(`chunk ${sent}\n`);
+      if (sent === 6) {
+        clearInterval(timer);
+        res.end("done");
+      }
+    }, 100);
+    res.on("close", () => clearInterval(timer));
+  });
+  const proxy = await startProxy(await config(upstream.url, "http://127.0.0.1:9", join(directory, "replay.db"), {
+    upstreamTimeoutMs: 250,
+    publicRoutes: [{ prefix: "/stream" }, { prefix: "/stall" }],
+  }));
+  try {
+    const streamed = await fetch(`${proxy.url}/stream`);
+    assert.equal(streamed.status, 200);
+    const text = await streamed.text();
+    assert.match(text, /chunk 6\ndone$/);
+
+    const started = Date.now();
+    const stalled = await send(proxy, "GET", "/stall");
+    assert.equal(stalled.status, 502);
+    assert.ok(Date.now() - started < 2_000);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test("a client that disconnects after sending its body cancels the upstream request", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tap-proxy-cancel-"));
+  let upstreamClosedAt: number | undefined;
+  let upstreamArrivedAt: number | undefined;
+  const upstream = await listen((req, res) => {
+    upstreamArrivedAt = Date.now();
+    req.resume();
+    res.on("close", () => {
+      upstreamClosedAt = Date.now();
+    });
+  });
+  const proxy = await startProxy(await config(upstream.url, "http://127.0.0.1:9", join(directory, "replay.db"), {
+    upstreamTimeoutMs: 10_000,
+    publicRoutes: [{ prefix: "/slow" }],
+  }));
+  try {
+    const controller = new AbortController();
+    const pending = fetch(`${proxy.url}/slow`, { method: "POST", body: "payload", signal: controller.signal })
+      .then(() => "done", () => "aborted");
+    await delay(100);
+    controller.abort();
+    assert.equal(await pending, "aborted");
+    await delay(200);
+    assert.notEqual(upstreamArrivedAt, undefined);
+    assert.notEqual(upstreamClosedAt, undefined, "upstream request was not cancelled");
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
 test("a route prefix ending in a slash matches only below it", () => {
   const routes = {
     protectedRoutes: [{ prefix: "/", tag: "agent-browser-auth" as const }],
@@ -455,6 +523,19 @@ test("a route prefix ending in a slash matches only below it", () => {
   assert.equal(matchRoute("/static/app.js", "GET", routes).kind, "public");
   assert.equal(matchRoute("/STATIC/app.js", "GET", routes).kind, "public");
   assert.equal(matchRoute("/admin/", "GET", { protectedRoutes: [{ prefix: "/admin", tag: "agent-browser-auth" }], publicRoutes: [] }).kind, "protected");
+});
+
+test("segment whitespace an upstream would trim cannot fall through to a shorter public prefix", () => {
+  const routes = {
+    protectedRoutes: [{ prefix: "/admin", tag: "agent-browser-auth" as const }, { prefix: "/only/", tag: "agent-browser-auth" as const }],
+    publicRoutes: [{ prefix: "/" }],
+  };
+  assert.equal(matchRoute("/admin%20", "GET", routes).kind, "protected");
+  assert.equal(matchRoute("/%20admin", "GET", routes).kind, "protected");
+  assert.equal(matchRoute("/admin%20/users", "GET", routes).kind, "protected");
+  assert.equal(matchRoute("/only/%20", "GET", routes).kind, "protected");
+  assert.equal(matchRoute("/admin%20x", "GET", routes).kind, "public");
+  assert.equal(matchRoute("/products/my%20item", "GET", routes).kind, "public");
 });
 
 test("proxy route policy treats star as every method and requires https and a backend token off loopback", () => {

@@ -1,6 +1,6 @@
 import { tapError } from "./errors.js";
 import { assertAlgorithm, assertKeyId, assertNonce, requireComponents } from "./fields.js";
-import { assertCoveredComponents, buildSignatureBase, componentValue, parseTarget } from "./target.js";
+import { assertCoveredComponents, buildSignatureBase, componentValue, type ParsedTarget } from "./target.js";
 import { LEGACY_LABEL, isAlgorithm, isIntentTag, type IntentTag, type RequestData } from "./types.js";
 
 import type { ParsedSignature } from "./message.js";
@@ -15,6 +15,7 @@ export function legacySignatureParams(
 
 export function parseLegacy(
   request: RequestData,
+  target: ParsedTarget,
   signatureInput: string,
   signatureHeader: string,
   expectedTag: IntentTag,
@@ -51,7 +52,6 @@ export function parseLegacy(
   const expires = strictInteger(fields.expires, "expires");
   assertCoveredComponents(components);
   requireComponents(components, requiredComponents);
-  const target = parseTarget(request.url);
   const values = components.map((name) => [name, componentValue(request, target, name, "legacySample")] as const);
   return {
     label: LEGACY_LABEL,

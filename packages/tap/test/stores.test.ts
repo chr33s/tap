@@ -238,6 +238,98 @@ test("sqlite replay reclaims a nonce whose deadline passed before it was pruned"
   store.close();
 });
 
+test("signature labels may appear in a different order in each header", async () => {
+  const pair = generateKeyPair("ed25519");
+  const clock = createManualClock(1_700_000_300_000);
+  const key: ResolvedKey = {
+    keyId: "k1",
+    publicKey: pair.publicKey.trim(),
+    algorithm: "ed25519",
+    agentId: "1",
+    agentName: "A",
+    agentDomain: "https://a.example",
+    expiresAt: null,
+  };
+  const client = createTapClient({ keyId: "k1", profile: "tap", signer: createSigner("ed25519", pair.privateKey), clock });
+  const request = { method: "GET", url: "https://example.com/a", headers: [] as Array<[string, string]> };
+  const signed = await client.signRequest(request, { tag: "agent-browser-auth" });
+  const verifier = createTapVerifier({
+    profile: "tap",
+    resolver: { async resolve() { return key; } },
+    replay: createMemoryReplayStore(clock),
+    trustSource: "store",
+    origins: ["https://example.com"],
+    clock,
+  });
+  const verified = await verifier.verifyRequest({
+    ...request,
+    headers: [
+      ["signature-input", `sig0=("@authority");created=${clock.now()};keyid="cdn", ${signed["Signature-Input"]}`],
+      ["signature", `${signed.Signature}, sig0=:AAAA:`],
+    ],
+  }, { tag: "agent-browser-auth" });
+  assert.equal(verified.keyId, "k1");
+  await assert.rejects(() => verifier.verifyRequest({
+    ...request,
+    headers: [
+      ["signature-input", `sig0=("@authority");created=${clock.now()};keyid="cdn", ${signed["Signature-Input"]}`],
+      ["signature", signed.Signature],
+    ],
+  }, { tag: "agent-browser-auth" }), /labels do not match/);
+});
+
+test("the resolver retries only transient failures and caches deterministic ones", async () => {
+  const clock = createManualClock(1_700_000_000_000);
+  const pair = generateKeyPair("ed25519");
+  const good = {
+    key_id: "k1",
+    public_key: pair.publicKey.trim(),
+    algorithm: "ed25519",
+    is_active: "true",
+    agent_id: 1,
+    agent_name: "A",
+    agent_domain: "https://a.example",
+    expires_at: null as unknown,
+  };
+  let calls = 0;
+  let mode: "bad-expiry" | "redirect" | "flaky" | "forbidden" = "bad-expiry";
+  const resolver = createRegistryKeyResolver({
+    registryUrl: "https://registry.test",
+    cacheTtlMs: 5_000,
+    transientRetries: 2,
+    retryBackoffMs: 1,
+    clock,
+    fetchImpl: async () => {
+      calls += 1;
+      if (mode === "bad-expiry") return new Response(JSON.stringify({ ...good, expires_at: "soon" }), { status: 200 });
+      if (mode === "redirect") return new Response(null, { status: 302, headers: { location: "https://elsewhere.test/" } });
+      if (mode === "forbidden") return new Response("no", { status: 403 });
+      if (calls % 3 !== 0) return new Response("busy", { status: 503 });
+      return new Response(JSON.stringify(good), { status: 200 });
+    },
+  });
+
+  await assert.rejects(() => resolver.resolve("k1"), /expires_at is invalid/);
+  await assert.rejects(() => resolver.resolve("k1"), /expires_at is invalid/);
+  assert.equal(calls, 1, "a malformed document is neither retried nor re-fetched within the ttl");
+
+  clock.advance(5_001);
+  mode = "redirect";
+  await assert.rejects(() => resolver.resolve("k1"), /registry redirected/);
+  assert.equal(calls, 2, "a redirect is not retried");
+
+  clock.advance(5_001);
+  mode = "forbidden";
+  await assert.rejects(() => resolver.resolve("k1"), /unauthorized/);
+  assert.equal(calls, 3);
+
+  clock.advance(5_001);
+  mode = "flaky";
+  const key = await resolver.resolve("k1");
+  assert.equal(key.keyId, "k1");
+  assert.equal(calls, 6, "two 503s are retried before the successful attempt");
+});
+
 test("registry lookups keep the url prefix, cache misses, and share concurrent requests", async () => {
   const clock = createManualClock(1_700_000_000_000);
   const urls: string[] = [];

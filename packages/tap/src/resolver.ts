@@ -1,7 +1,7 @@
 import { isAbortError, mergeSignals, throwIfAborted } from "./abort.js";
 import { systemClock } from "./clock.js";
 import { assertPublicKey, canonicalPublicKey } from "./crypto.js";
-import { tapError } from "./errors.js";
+import { isTapError, tapError } from "./errors.js";
 import { assertKeyId } from "./fields.js";
 import { MAX_KEY_CACHE_TTL_MS, isAlgorithm, type Clock, type KeyResolver, type ResolvedKey } from "./types.js";
 
@@ -13,10 +13,14 @@ export interface RegistryKeyResolverOptions {
   clock?: Clock;
   fetchImpl?: typeof fetch;
   /**
-   * Extra attempts after a transient registry failure. `401`/`403` are not
-   * retried. Default is 2.
+   * Extra attempts after a transient registry failure: a network error, a
+   * timeout, or a `5xx`. Anything the registry answered deterministically
+   * (`401`/`403`, a redirect, an unparseable document) is not retried.
+   * Attempts are spaced by `retryBackoffMs`, doubling each time. Default is 2.
    */
   transientRetries?: number;
+  /** Delay before the first retry, in milliseconds. Default is 50. */
+  retryBackoffMs?: number;
 }
 
 /**
@@ -47,14 +51,15 @@ interface Lookup {
  * construction; request headers cannot redirect it. Redirect responses fail
  * closed. Cache hits never outlive `min(ttl, 30s, key expiry)`. Lookups run
  * before the signature can be checked, so unknown, inactive, and expired keys
- * are cached for the same TTL, and concurrent lookups for one key id share a
- * single registry request.
+ * and unusable registry documents are cached for the same TTL, and concurrent
+ * lookups for one key id share a single registry request.
  */
 export function createRegistryKeyResolver(options: RegistryKeyResolverOptions): KeyResolver {
   const registryUrl = normalizeRegistryUrl(options.registryUrl);
   const ttlMs = Math.min(Math.max(options.cacheTtlMs ?? 5_000, 0), MAX_KEY_CACHE_TTL_MS);
   const timeoutMs = options.timeoutMs ?? 2_000;
   const retries = Math.max(0, options.transientRetries ?? 2);
+  const backoffMs = Math.max(0, options.retryBackoffMs ?? 50);
   const clock = options.clock ?? systemClock;
   const fetchImpl = options.fetchImpl ?? fetch;
   const cache = new Map<string, CacheEntry>();
@@ -74,10 +79,14 @@ export function createRegistryKeyResolver(options: RegistryKeyResolverOptions): 
         return key;
       } catch (error) {
         lastError = error;
-        if (isTrustError(error) && ttlMs > 0) {
+        const transient = isTransient(error);
+        // Deterministic answers are remembered so a registry that is serving
+        // a broken document is not asked again on every request.
+        if (!transient && isCacheableMiss(error) && ttlMs > 0) {
           remember(misses, MAX_MISS_ENTRIES, keyId, { error, freshUntilMs: clock.nowMs() + ttlMs });
         }
-        if (!isTransient(error) || attempt === retries) break;
+        if (!transient || attempt === retries) break;
+        await sleep(backoffMs * 2 ** attempt, signal);
       }
     }
     throw lastError;
@@ -110,6 +119,21 @@ export function createRegistryKeyResolver(options: RegistryKeyResolverOptions): 
       });
     },
   };
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function remember<T>(map: Map<string, T>, limit: number, keyId: string, entry: T): void {
@@ -193,9 +217,11 @@ export async function fetchRegistryKey(input: {
   const signal = mergeSignals([input.signal, timeout]);
   let response: Response;
   try {
+    // `manual` so a redirect is seen as the registry's deterministic answer
+    // rather than a network failure; it is never followed.
     response = await fetchImpl(url, {
       method: "GET",
-      redirect: "error",
+      redirect: "manual",
       headers: { accept: "application/json" },
       signal,
     });
@@ -203,13 +229,17 @@ export async function fetchRegistryKey(input: {
     if (input.signal?.aborted || isAbortError(error) && input.signal?.aborted) {
       throw tapError("cancelled", "operation aborted");
     }
-    if (isAbortError(error)) throw tapError("resolver_unavailable", "registry request timed out");
-    throw tapError("resolver_unavailable", "registry request failed");
+    if (isAbortError(error)) throw tapError("resolver_unavailable", TRANSIENT_TIMEOUT);
+    throw tapError("resolver_unavailable", TRANSIENT_NETWORK);
+  }
+  if (response.status === 0 || (response.status >= 300 && response.status < 400)) {
+    throw tapError("resolver_unavailable", "registry redirected");
   }
   if (response.status === 404) throw tapError("trust", "key not found");
   if (response.status === 401 || response.status === 403) {
     throw tapError("resolver_unavailable", "unauthorized");
   }
+  if (response.status >= 500) throw tapError("resolver_unavailable", `${TRANSIENT_STATUS}${response.status}`);
   if (!response.ok) throw tapError("resolver_unavailable", `registry status ${response.status}`);
   let body: unknown;
   try {
@@ -305,16 +335,19 @@ function isExpired(key: ResolvedKey, nowSeconds: number): boolean {
   return key.expiresAt !== null && key.expiresAt <= nowSeconds;
 }
 
+const TRANSIENT_TIMEOUT = "registry request timed out";
+const TRANSIENT_NETWORK = "registry request failed";
+const TRANSIENT_STATUS = "registry unavailable, status ";
+
+/** Only failures that a later attempt could plausibly resolve. */
 function isTransient(error: unknown): boolean {
-  return error instanceof Error
-    && "code" in error
-    && error.code === "resolver_unavailable"
-    && "reason" in error
-    && error.reason !== "unauthorized";
+  if (!isTapError(error) || error.code !== "resolver_unavailable") return false;
+  return error.reason === TRANSIENT_TIMEOUT || error.reason === TRANSIENT_NETWORK || error.reason.startsWith(TRANSIENT_STATUS);
 }
 
-function isTrustError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "trust";
+/** Deterministic registry answers: unknown or unusable keys and bad documents. */
+function isCacheableMiss(error: unknown): boolean {
+  return isTapError(error) && (error.code === "trust" || error.code === "resolver_unavailable");
 }
 
 function isTapTrust(error: unknown): boolean {

@@ -91,5 +91,5 @@ export async function signRequest(
   if (options.signer.algorithm === "ed25519" && signature.length !== 64) {
     throw tapError("invalid_signature", "ed25519 signature must be 64 bytes");
   }
-  return formatSignatureHeaders(options.profile, material, signature);
+  return formatSignatureHeaders(material, signature);
 }

@@ -63,6 +63,17 @@ test("registry lifecycle, auth, rotation, and lookup", async () => {
     const earlyKey = await call(registry, "PUT", `/agents/${agent.id}/keys/alpha-1`, { is_active: "true" }, TOKEN);
     assert.equal(earlyKey.status, 409);
 
+    // Key ids the verifier would refuse to look up cannot be registered.
+    for (const keyId of [".", "..", "a/b", "a b"]) {
+      const dot = await call(registry, "POST", `/agents/${agent.id}/keys`, {
+        key_id: keyId,
+        public_key: other.publicKey.trim(),
+        algorithm: "ed25519",
+      }, TOKEN);
+      assert.equal(dot.status, 400, keyId);
+      assert.equal(dot.body.message, "invalid key id");
+    }
+
     const activated = await call(registry, "PUT", `/agents/${agent.id}`, { is_active: "true" }, TOKEN);
     assert.equal(activated.status, 200);
     assert.equal((activated.body.agent as AgentBody).is_active, "true");

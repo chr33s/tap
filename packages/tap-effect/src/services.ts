@@ -123,8 +123,10 @@ export interface RegistryResolverConfig {
   timeoutMs?: number;
   clock?: Clock;
   fetchImpl?: typeof fetch;
-  /** Retries after the first attempt. Authentication failures are not retried. */
+  /** Retries after a network error, timeout, or `5xx`. Deterministic registry answers are not retried. */
   transientRetries?: number;
+  /** Delay before the first retry, doubling each time. Default is 50 ms. */
+  retryBackoffMs?: number;
 }
 
 /** Cached registry resolver. The core resolver owns the retry loop and the 30 second revocation bound. */

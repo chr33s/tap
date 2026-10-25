@@ -85,13 +85,13 @@ async function handle(
     if (decision.kind === "protected") {
       const request = externalRequest(req, config);
       const required = decision.route.requiredComponents ? [...decision.route.requiredComponents] : undefined;
+      // The request body is already consumed, so `req` will not emit `aborted`
+      // again; a client that goes away now surfaces as `close` on `res`.
       const abort = new AbortController();
-      const onAborted = (): void => abort.abort();
-      if (req.aborted) abort.abort();
-      req.on("aborted", onAborted);
-      res.on("close", () => {
-        if (!res.writableEnded) onAborted();
-      });
+      const onClosed = (): void => {
+        if (!res.writableEnded) abort.abort();
+      };
+      res.on("close", onClosed);
       try {
         verified = await runtime.runPromise(
           Effect.gen(function* () {
@@ -104,7 +104,7 @@ async function handle(
           }),
         );
       } finally {
-        req.off("aborted", onAborted);
+        res.off("close", onClosed);
       }
     }
     forward(req, res, config, verified, method, pathOnly, body);
@@ -128,7 +128,6 @@ function forward(
   if (body.length > 0) headers["content-length"] = body.length;
   else delete headers["content-length"];
   const transport = config.upstream.protocol === "https:" ? https : http;
-  const signal = AbortSignal.timeout(config.upstreamTimeoutMs);
   let responded = false;
   const fail = (status: number, code: string, error: string): void => {
     if (responded || res.headersSent || res.writableEnded) {
@@ -146,9 +145,9 @@ function forward(
       method: req.method,
       path: upstreamPath(config.upstream, req.url ?? "/"),
       headers,
-      signal,
     },
     (upstreamRes) => {
+      clearTimeout(headersTimer);
       upstreamRes.on("error", () => fail(502, "bad_gateway", "bad_gateway"));
       res.on("error", () => upstreamRes.destroy());
       const responseHeaders = { ...upstreamRes.headers };
@@ -164,7 +163,18 @@ function forward(
       log(method, pathOnly, upstreamRes.statusCode ?? 502);
     },
   );
-  req.on("aborted", () => upstreamReq.destroy());
+  // Bounds time to response headers only: a body that is still streaming
+  // after the deadline (a large file, SSE, a long poll) is not cut off.
+  const headersTimer = setTimeout(() => {
+    upstreamReq.destroy(new Error("upstream headers timeout"));
+  }, config.upstreamTimeoutMs);
+  upstreamReq.on("close", () => clearTimeout(headersTimer));
+  // The request body was read before verification, so `req` no longer emits
+  // `aborted`; a client that disconnects is seen as `close` on `res` before
+  // `res` has ended.
+  res.on("close", () => {
+    if (!res.writableEnded) upstreamReq.destroy();
+  });
   upstreamReq.on("error", () => fail(502, "bad_gateway", "bad_gateway"));
   upstreamReq.end(body);
 }

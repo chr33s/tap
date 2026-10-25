@@ -99,14 +99,9 @@ export function createSignatureMaterial(input: {
   };
 }
 
-export function formatSignatureHeaders(profile: ProfileName, material: SignatureMaterial, signature: Uint8Array): SignatureHeaders {
+/** `material.label` already carries the profile's label. */
+export function formatSignatureHeaders(material: SignatureMaterial, signature: Uint8Array): SignatureHeaders {
   const encoded = Buffer.from(signature).toString("base64");
-  if (profile === "legacySample") {
-    return {
-      "Signature-Input": `${LEGACY_LABEL}=${material.signatureParams}`,
-      Signature: `${LEGACY_LABEL}=:${encoded}:`,
-    };
-  }
   return {
     "Signature-Input": `${material.label}=${material.signatureParams}`,
     Signature: `${material.label}=:${encoded}:`,
@@ -118,14 +113,19 @@ export function parseSignatureHeaders(input: {
   profile: ProfileName;
   expectedTag: IntentTag;
   requiredComponents?: readonly string[];
+  /** `request.url` already parsed by the caller, so the URL is parsed once per verification. */
+  target?: ParsedTarget;
 }): ParsedSignature {
   const signatureInput = singleHeader(input.request, "signature-input");
   const signature = singleHeader(input.request, "signature");
   if (signatureInput === undefined || signature === undefined) {
     throw tapError("policy", "missing signature headers");
   }
-  if (input.profile === "legacySample") return parseLegacy(input.request, signatureInput, signature, input.expectedTag, input.requiredComponents);
-  return parseTap(input.request, signatureInput, signature, input.expectedTag, input.requiredComponents);
+  const target = input.target ?? parseTarget(input.request.url);
+  if (input.profile === "legacySample") {
+    return parseLegacy(input.request, target, signatureInput, signature, input.expectedTag, input.requiredComponents);
+  }
+  return parseTap(input.request, target, signatureInput, signature, input.expectedTag, input.requiredComponents);
 }
 
 export function cryptographicVerify(material: ParsedSignature, publicKey: string): boolean {
@@ -134,6 +134,7 @@ export function cryptographicVerify(material: ParsedSignature, publicKey: string
 
 function parseTap(
   request: RequestData,
+  target: ParsedTarget,
   signatureInput: string,
   signatureHeader: string,
   expectedTag: IntentTag,
@@ -148,10 +149,14 @@ function parseTap(
     if (error instanceof SfParseError) throw tapError("malformed", error.message);
     throw error;
   }
-  const inputLabels = inputDict.entries.map((entry) => entry.key);
-  const sigLabels = sigDict.entries.map((entry) => entry.key);
-  if (inputLabels.length === 0 || sigLabels.length === 0) throw tapError("malformed", "missing signature label");
-  if (inputLabels.join("\0") !== sigLabels.join("\0")) throw tapError("malformed", "signature labels do not match");
+  // RFC 8941 dictionaries are unordered: the same labels may appear in a
+  // different order in each header, so compare them as sets.
+  const inputLabels = new Set(inputDict.entries.map((entry) => entry.key));
+  const sigLabels = new Set(sigDict.entries.map((entry) => entry.key));
+  if (inputLabels.size === 0 || sigLabels.size === 0) throw tapError("malformed", "missing signature label");
+  if (inputLabels.size !== sigLabels.size || [...inputLabels].some((label) => !sigLabels.has(label))) {
+    throw tapError("malformed", "signature labels do not match");
+  }
 
   const candidates = [];
   for (const entry of inputDict.entries) {
@@ -170,11 +175,12 @@ function parseTap(
   if (!sigEntry || sigEntry.value.type !== "item" || sigEntry.value.bare.type !== "binary" || sigEntry.value.params.length > 0) {
     throw tapError("malformed", "signature member must be a byte sequence");
   }
-  return finishParsed(request, "tap", chosen.key, chosen.value, sigEntry.value.bare.value, expectedTag, requiredComponents);
+  return finishParsed(request, target, "tap", chosen.key, chosen.value, sigEntry.value.bare.value, expectedTag, requiredComponents);
 }
 
 function finishParsed(
   request: RequestData,
+  target: ParsedTarget,
   profile: ProfileName,
   label: string,
   inner: SfInnerList,
@@ -205,7 +211,6 @@ function finishParsed(
   assertNonce(nonce);
   assertCoveredComponents(components);
   requireComponents(components, requiredComponents);
-  const target = parseTarget(request.url);
   const values = components.map((name) => [name, componentValue(request, target, name, profile)] as const);
   const signatureParams = serializeMember(inner);
   return {
@@ -268,8 +273,4 @@ function integerParam(params: readonly SfParameter[], key: string): number {
 
 export function assertProfileAlgorithm(profile: ProfileName, alg: Algorithm): void {
   assertAlgorithm(profile, alg);
-}
-
-export function readTarget(url: string): ParsedTarget {
-  return parseTarget(url);
 }

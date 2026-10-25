@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseTarget } from "tap";
+import { assertSafeRequestTarget, parseTarget } from "tap";
 
 import { parseDictionary } from "../src/sfv.ts";
 import { promiseApi, runConformance } from "./conformance.ts";
@@ -23,6 +23,14 @@ test("request targets reject fragments, backslashes, and dot segments", () => {
   assert.throws(() => parseTarget("https://example.com/product/%2E/%2e%2E/x"), /dot segment/);
   assert.throws(() => parseTarget("https://example.com/product/1#x"), /fragment/);
   assert.throws(() => parseTarget("https://example.com/a\\b"), /backslash/);
+  // The proxy boundary applies the same path rules as the verifier.
+  assertSafeRequestTarget("/product/1?q=%2e%2e");
+  assert.throws(() => assertSafeRequestTarget("/product/%2e%2e/admin"), /dot segment/);
+  assert.throws(() => assertSafeRequestTarget("/product/1#x"), /fragment/);
+  assert.throws(() => assertSafeRequestTarget("/a\\b"), /backslash/);
+  assert.throws(() => assertSafeRequestTarget("/a?b\\c"), /backslash/);
+  assert.throws(() => assertSafeRequestTarget("/a\tb"), /control character/);
+  assert.throws(() => assertSafeRequestTarget("product"), /invalid request target/);
 });
 
 test("promise API conformance", async () => {

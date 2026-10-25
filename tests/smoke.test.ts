@@ -106,6 +106,32 @@ test("dev key, registry approval, and agent send reach the echo backend", async 
     assert.equal(echoed.headers["x-tap-covered"], "@authority,@path");
     assert.equal(echoed.headers["x-tap-backend-token"], "backend-secret");
 
+    const covered = await agent([
+      "send",
+      "--url",
+      `${proxy.url}/product/7`,
+      "--tag",
+      "agent-browser-auth",
+      "--key-id",
+      "smoke-1",
+      "--key-file",
+      privatePath,
+      "--covered",
+      "@authority,@path,user-agent,x-trace",
+      "--header",
+      "user-agent: smoke-bot/2",
+      "--header",
+      "x-trace: a",
+      "--header",
+      "x-trace: b",
+    ]);
+    assert.equal(covered.code, 0, covered.stderr);
+    assert.match(covered.stderr, /HTTP 200/);
+    const coveredEcho = JSON.parse(covered.stdout) as { headers: Record<string, string> };
+    assert.equal(coveredEcho.headers["user-agent"], "smoke-bot/2");
+    assert.equal(coveredEcho.headers["x-trace"], "a, b");
+    assert.equal(coveredEcho.headers["x-tap-covered"], "@authority,@path,user-agent,x-trace");
+
     const inactive = await fetch(`${registry.url}/agents/${id}/keys/smoke-1`, {
       method: "PUT",
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },

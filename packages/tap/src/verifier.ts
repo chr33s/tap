@@ -71,12 +71,14 @@ export async function verifyRequest(
   deps: TapVerifierOptions & { clock: Clock; allowedSkewSeconds: number },
 ): Promise<VerifiedAgent> {
   throwIfAborted(verifyOptions.signal);
+  const target = parseTarget(request.url);
   // Before the key lookup, so a foreign origin never reaches the registry.
-  if (!deps.origins.includes(originOf(parseTarget(request.url)))) {
+  if (!deps.origins.includes(originOf(target))) {
     throw tapError("policy", "request origin is not served by this verifier");
   }
   const parsed = parseSignatureHeaders({
     request,
+    target,
     profile: deps.profile,
     expectedTag: verifyOptions.tag,
     requiredComponents: verifyOptions.requiredComponents,
@@ -96,6 +98,9 @@ export async function verifyRequest(
     throw tapError("resolver_unavailable", "key resolver failed");
   }
   throwIfAborted(verifyOptions.signal);
+  // The key lookup is the only step that takes real time before the nonce is
+  // claimed, so the window is re-checked here and nowhere later: a failure
+  // after the claim would consume the nonce and still reject.
   assertTimeWindow(parsed.created, parsed.expires, now(), deps.allowedSkewSeconds);
   if (key.keyId !== parsed.keyId) throw tapError("trust", "resolved key id does not match");
   if (key.algorithm !== parsed.alg) throw tapError("trust", "key algorithm does not match the signature");
@@ -111,7 +116,6 @@ export async function verifyRequest(
   }
   if (!valid) throw tapError("invalid_signature", "signature verification failed");
 
-  assertTimeWindow(parsed.created, parsed.expires, now(), deps.allowedSkewSeconds);
   const until = parsed.expires + deps.allowedSkewSeconds;
   let claim;
   try {
@@ -130,7 +134,6 @@ export async function verifyRequest(
   }
   if (claim === "expired") throw tapError("invalid_time", "replay claim deadline has passed");
   if (claim === "duplicate") throw tapError("replay", "nonce has already been used");
-  assertTimeWindow(parsed.created, parsed.expires, now(), deps.allowedSkewSeconds);
   throwIfAborted(verifyOptions.signal);
   return {
     agentId: key.agentId,

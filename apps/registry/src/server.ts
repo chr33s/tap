@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { Context, Effect, Layer, ManagedRuntime, Schema } from "effect";
-import { isLoopbackHost } from "tap";
+import { assertKeyId, isLoopbackHost } from "tap";
 
 import { HttpReply } from "./http-error.js";
 import {
@@ -275,7 +275,10 @@ function toRegister(body: typeof RegisterBody.Type): RegisterInput {
 
 function toKeyInput(body: typeof KeyBody.Type): KeyInput {
   const keyId = requiredText(body.key_id, "key_id", 100);
-  if (!/^[A-Za-z0-9._-]{1,100}$/.test(keyId)) {
+  // The same rule the verifier applies, so every registered key id is resolvable.
+  try {
+    assertKeyId(keyId);
+  } catch {
     throw new HttpReply({ status: 400, body: { error: "malformed", message: "invalid key id" } });
   }
   return {

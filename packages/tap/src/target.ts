@@ -22,28 +22,25 @@ export interface ParsedTarget {
 const URL_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(?:\?([^#]*))?$/;
 
 /**
- * Rejects request targets whose path is not the path a normalizing server
- * would route. Fragments and backslashes are not part of an origin-form
- * target. `.` and `..` segments, including `%2e`, change meaning under
- * WHATWG URL parsing.
+ * Rejects origin-form request targets whose path is not the path a
+ * normalizing server would route. Applies the same path and query rules as
+ * `parseTarget`, so the proxy boundary and the verifier cannot disagree about
+ * what is routable.
  */
 export function assertSafeRequestTarget(requestTarget: string): void {
-  if (requestTarget.length === 0 || requestTarget.length > 8_192) {
+  if (requestTarget.length === 0 || requestTarget.length > 8_192 || !requestTarget.startsWith("/")) {
     throw tapError("malformed", "invalid request target");
   }
-  if (!requestTarget.startsWith("/")) throw tapError("malformed", "invalid request target");
-  if (requestTarget.includes("#") || requestTarget.includes("\\")) {
-    throw tapError("malformed", "request target contains a fragment or backslash");
-  }
-  const path = requestTarget.split("?")[0] ?? requestTarget;
-  assertNoDotSegments(path);
+  const query = requestTarget.indexOf("?");
+  assertPathAndQuery(
+    query < 0 ? requestTarget : requestTarget.slice(0, query),
+    query < 0 ? undefined : requestTarget.slice(query + 1),
+  );
 }
 
 export function parseTarget(url: string): ParsedTarget {
   if (url.length > 8_192) throw tapError("malformed", "url is too long");
-  if (url.includes("#") || url.includes("\\")) {
-    throw tapError("malformed", "request target contains a fragment or backslash");
-  }
+  assertNoFragmentOrBackslash(url);
   const match = URL_RE.exec(url);
   if (!match) throw tapError("malformed", "url must be an absolute http(s) URL");
   const schemeRaw = match[1];
@@ -55,11 +52,8 @@ export function parseTarget(url: string): ParsedTarget {
   if (scheme !== "http" && scheme !== "https") throw tapError("malformed", "url scheme must be http or https");
   if (authority.includes("@")) throw tapError("malformed", "url userinfo is not allowed");
   if (authority.length === 0) throw tapError("malformed", "url is missing an authority");
-  if (/[\u0000-\u0020\u007f]/.test(authority) || /[\u0000-\u001f\u007f]/.test(path) || (query !== undefined && /[\u0000-\u001f\u007f]/.test(query))) {
-    throw tapError("malformed", "url contains a control character or space");
-  }
-  if (path !== "" && !path.startsWith("/")) throw tapError("malformed", "url path must be empty or absolute");
-  assertNoDotSegments(path);
+  if (/[\u0000-\u0020\u007f]/.test(authority)) throw tapError("malformed", "url contains a control character or space");
+  assertPathAndQuery(path, query);
   return {
     scheme,
     rawAuthority: authority,
@@ -179,6 +173,27 @@ function headerComponent(headers: ReadonlyArray<readonly [string, string]>, name
     return value.replace(/^[ \t]+|[ \t]+$/g, "");
   });
   return normalized.join(", ");
+}
+
+/**
+ * Path and query rules shared by `parseTarget` and `assertSafeRequestTarget`.
+ * Fragments and backslashes are not part of a request target; `.` and `..`
+ * segments, including `%2e`, change meaning under WHATWG URL parsing.
+ */
+function assertPathAndQuery(path: string, query: string | undefined): void {
+  assertNoFragmentOrBackslash(path);
+  if (query !== undefined) assertNoFragmentOrBackslash(query);
+  if (/[\u0000-\u001f\u007f]/.test(path) || (query !== undefined && /[\u0000-\u001f\u007f]/.test(query))) {
+    throw tapError("malformed", "url contains a control character");
+  }
+  if (path !== "" && !path.startsWith("/")) throw tapError("malformed", "url path must be empty or absolute");
+  assertNoDotSegments(path);
+}
+
+function assertNoFragmentOrBackslash(value: string): void {
+  if (value.includes("#") || value.includes("\\")) {
+    throw tapError("malformed", "request target contains a fragment or backslash");
+  }
 }
 
 function assertNoDotSegments(path: string): void {

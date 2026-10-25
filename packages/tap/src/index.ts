@@ -2,6 +2,7 @@ export { throwIfAborted, isAbortError, mergeSignals } from "./abort.js";
 export { createManualClock, systemClock, type ManualClock } from "./clock.js";
 export { assertPublicKey, canonicalPublicKey, createSigner, generateKeyPair, verifySignature, type GeneratedKeyPair } from "./crypto.js";
 export { TapError, isTapError, TAP_ERROR_CODES, type TapErrorCode } from "./errors.js";
+export { assertKeyId, assertNonce } from "./fields.js";
 export {
   assertTimeWindow,
   createSignatureMaterial,

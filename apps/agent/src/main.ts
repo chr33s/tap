@@ -93,7 +93,7 @@ async function keygen(input: Args): Promise<void> {
 
 async function sign(input: Args, deliver: boolean): Promise<void> {
   const profile = profileName(flag(input, "profile", "tap"));
-  const alg = algorithm(flag(input, "alg", profile === "tap" ? "ed25519" : "ed25519"));
+  const alg = algorithm(flag(input, "alg", "ed25519"));
   const keyId = required(flag(input, "key-id"), "key id");
   const keyFile = required(flag(input, "key-file"), "key file");
   const url = wireUrl(required(flag(input, "url"), "url"));
@@ -105,9 +105,8 @@ async function sign(input: Args, deliver: boolean): Promise<void> {
   const headers = headerPairs(input.flags.get("header") ?? []);
   const dataFile = flag(input, "data-file");
   const body = dataFile ? readFileSync(dataFile) : undefined;
-  if (body && !headers.some(([name]) => name.toLowerCase() === "content-type")) {
-    headers.push(["content-type", "application/octet-stream"]);
-  }
+  if (body && !hasHeader(headers, "content-type")) headers.push(["content-type", "application/octet-stream"]);
+  if (deliver && !hasHeader(headers, "user-agent")) headers.push(["user-agent", "tap-agent/1.0"]);
   const request: RequestData = { method, url, headers };
   const client = createTapClient({
     keyId,
@@ -124,17 +123,13 @@ async function sign(input: Args, deliver: boolean): Promise<void> {
     process.stdout.write(`Signature: ${signed.Signature}\n`);
     return;
   }
-  const response = await fetch(url, {
-    method,
-    headers: {
-      ...Object.fromEntries(headers),
-      "Signature-Input": signed["Signature-Input"],
-      Signature: signed.Signature,
-      "user-agent": "tap-agent/1.0",
-    },
-    body,
-    redirect: "manual",
-  });
+  // Appended one by one so a repeated header goes on the wire as the same
+  // `a, b` list the signature base covered, and nothing overrides a signed value.
+  const wire = new Headers();
+  for (const [name, value] of headers) wire.append(name, value);
+  wire.set("Signature-Input", signed["Signature-Input"]);
+  wire.set("Signature", signed.Signature);
+  const response = await fetch(url, { method, headers: wire, body, redirect: "manual" });
   process.stderr.write(`HTTP ${response.status}\n`);
   process.stdout.write(Buffer.from(await response.arrayBuffer()));
 }
@@ -153,6 +148,10 @@ function wireUrl(value: string): string {
   }
   parsed.hash = "";
   return parsed.href;
+}
+
+function hasHeader(headers: ReadonlyArray<readonly [string, string]>, name: string): boolean {
+  return headers.some(([header]) => header.toLowerCase() === name);
 }
 
 function headerPairs(values: readonly string[]): Array<[string, string]> {

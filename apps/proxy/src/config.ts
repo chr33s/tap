@@ -157,7 +157,7 @@ export function canonicalRoutePath(path: string): string {
   }
   if (/%[0-9A-Fa-f]{2}/.test(decoded)) throw new TapError("malformed", "path is encoded too many times");
   if (/[\u0000-\u001f\u007f\\]/.test(decoded)) throw new TapError("malformed", "path contains a control character or backslash");
-  const raw = decoded.split("/").map((segment) => segment.split(";")[0] ?? "");
+  const raw = decoded.split("/").map((segment) => (segment.split(";")[0] ?? "").replace(/^ +| +$/g, ""));
   const segments: string[] = [];
   for (const segment of raw) {
     if (segment.length === 0) continue;
@@ -165,6 +165,7 @@ export function canonicalRoutePath(path: string): string {
     segments.push(segment.toLowerCase());
   }
   if (segments.length === 0) return "/";
+  // A final segment that was only spaces routes like a trailing slash.
   const trailingSlash = raw[raw.length - 1] === "";
   return `/${segments.join("/")}${trailingSlash ? "/" : ""}`;
 }
