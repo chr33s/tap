@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+data/
+coverage/
+.DS_Store
+tap-keys/
+*.private

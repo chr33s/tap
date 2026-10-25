@@ -1,0 +1,20 @@
+{
+  "name": "@chr33s/tap-effect",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "effect": "4.0.6",
+    "@chr33s/tap": "*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts"
+}
